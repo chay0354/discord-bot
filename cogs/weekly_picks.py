@@ -13,6 +13,7 @@ from discord.ext import commands
 
 import database
 from config import (
+    CATEGORIES,
     CATEGORY_TITLES,
     CHANNEL_BLUE_LIVE,
     CHANNEL_BLUE_TICKER,
@@ -32,6 +33,7 @@ from config import (
     ROLE_WINNER,
     TICKER_LIMIT_PER_CATEGORY,
 )
+from services.category_reconcile import CategoryMove, reconcile_ticker_categories
 from services.finnhub_client import FinnhubQuote, format_quote, quote_and_names_for_symbols
 # import OpenPickerView to re-open ticker channels without touching submission_ui.py
 from cogs.submission_ui import OpenPickerView
@@ -122,6 +124,7 @@ _vote_counts: Dict[int, Dict[str, int]] = {0: {}, 1: {}, 2: {}}
 
 # live leaderboard message ids per category (best-effort, not persisted)
 _live_msg_ids: Dict[int, int] = {}
+_leaderboard_update_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
 
 # track the message ids of "VOTING OPEN" per guild per category for countdown updates
 # structure: {guild_id: {cat_idx: message_id}}
@@ -279,6 +282,37 @@ def _inc_count(cat: int, ticker: str, delta: int = 1) -> int:
     return d[ticker]
 
 
+def _revert_optimistic_vote(cat: int, user_id: int, ticker: str) -> None:
+    sym = ticker.upper()
+    user_set = _user_votes[cat].get(user_id)
+    if user_set:
+        user_set.discard(sym)
+    counts = _vote_counts[cat]
+    if sym in counts:
+        counts[sym] = max(0, counts[sym] - 1)
+        if counts[sym] == 0:
+            counts.pop(sym, None)
+
+
+def hydrate_vote_state(guild_id: int, week_key: str | None = None) -> None:
+    """Load this week's votes into memory so button replies can be instant."""
+    wk = week_key or database.week_key_for()
+    rows = database.fetch_week_vote_rows(guild_id, wk)
+    cat_keys = ["small", "mid", "blue"]
+    for idx in range(3):
+        _vote_counts[idx].clear()
+        _user_votes[idx].clear()
+    for row in rows:
+        cat = row.get("category")
+        if cat not in cat_keys:
+            continue
+        idx = cat_keys.index(cat)
+        sym = str(row["ticker"]).upper()
+        uid = int(row["user_id"])
+        _vote_counts[idx][sym] = _vote_counts[idx].get(sym, 0) + 1
+        _user_votes[idx].setdefault(uid, set()).add(sym)
+
+
 def _sorted_leaderboard(cat: int) -> List[Tuple[str, int]]:
     """Return [(ticker, count)] sorted by count desc, then ticker asc."""
     items = list(_vote_counts[cat].items())
@@ -361,13 +395,33 @@ def _leaderboard_embed(
     return emb
 
 
+def _schedule_leaderboard_update(guild: discord.Guild, cat: int) -> None:
+    """Debounced live leaderboard refresh so votes confirm instantly."""
+    key = (guild.id, cat)
+    existing = _leaderboard_update_tasks.get(key)
+    if existing and not existing.done():
+        existing.cancel()
+
+    async def _run() -> None:
+        try:
+            await asyncio.sleep(1.25)
+            await _post_or_update_leaderboard(guild, cat)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    _leaderboard_update_tasks[key] = asyncio.create_task(_run())
+
+
 async def _post_or_update_leaderboard(guild: discord.Guild, cat: int) -> None:
     """Post or edit the live leaderboard in the corresponding -live channel."""
     ch_name = _category_idx_to_live_name(cat)
     ch = _find_text_channel(guild, ch_name)
     if not ch:
         return
-    pairs = database.vote_counts(guild.id, database.week_key_for(), ["small", "mid", "blue"][cat])
+    week_key = database.week_key_for()
+    pairs = database.vote_counts(guild.id, week_key, ["small", "mid", "blue"][cat])
     tickers = [ticker for ticker, _ in pairs]
     quotes, names = await asyncio.to_thread(quote_and_names_for_symbols, tickers)
     emb = _leaderboard_embed(cat, pairs, quotes, names)
@@ -450,27 +504,148 @@ async def _reset_pick_results(guild: discord.Guild) -> None:
 
 # ===================== Voting View =====================
 
+def _vote_button_label(symbol: str, quote: FinnhubQuote | None) -> str:
+    """Discord button label, e.g. $KULR @ $3.60 (max 80 chars)."""
+    sym = symbol.upper().strip().lstrip("$")
+    if quote and quote.current_price is not None:
+        return f"${sym} @ ${quote.current_price:.2f}"[:80]
+    return f"${sym}"[:80]
+
+
 class WeeklyVotingView(discord.ui.View):
     """Active voting buttons for the tickers selected by subscribers."""
 
-    def __init__(self, category_idx: int, tickers: List[str]):
+    def __init__(
+        self,
+        category_idx: int,
+        tickers: List[str],
+        quotes: dict[str, FinnhubQuote] | None = None,
+    ):
         # persistent during runtime; not persisted across restarts
         super().__init__(timeout=None)
         self.category_idx = category_idx
         self.tickers = tickers[:20]  # Discord allows max 25 components; keep 20 game options.
+        quotes = quotes or {}
 
         for t in self.tickers:
             btn = discord.ui.Button(
-                label=t,
+                label=_vote_button_label(t, quotes.get(t.upper())),
                 style=discord.ButtonStyle.primary,
                 custom_id=f"vote:{category_idx}:{t}",
             )
 
             async def _cb(interaction: discord.Interaction, ticker=t):
-                await self._handle_vote(interaction, ticker)
+                try:
+                    await interaction.response.defer(ephemeral=True)
+                except discord.InteractionResponded:
+                    pass
+                await self._handle_vote(interaction, ticker, already_deferred=True)
 
             btn.callback = _cb  # type: ignore
             self.add_item(btn)
+
+    async def _finalize_vote_background(
+        self,
+        interaction: discord.Interaction,
+        *,
+        guild: discord.Guild,
+        cat: int,
+        category_key: str,
+        week_key: str,
+        ticker: str,
+        member: discord.Member,
+        limit: int,
+        role_at_vote: str,
+    ) -> None:
+        try:
+            ctx = await asyncio.to_thread(
+                database.vote_button_context,
+                guild.id,
+                week_key,
+                category_key,
+                member.id,
+                ticker,
+            )
+            if not ctx["voting_open"]:
+                _revert_optimistic_vote(cat, member.id, ticker)
+                await interaction.followup.send(
+                    "Voting is closed. Next voting opens Monday at 9:00 AM ET.",
+                    ephemeral=True,
+                )
+                return
+
+            actual_cat = ctx["actual_category"]
+            if not actual_cat:
+                _revert_optimistic_vote(cat, member.id, ticker)
+                await interaction.followup.send(
+                    f"${ticker} is not in this week's game lists.",
+                    ephemeral=True,
+                )
+                return
+
+            save_cat = cat
+            save_key = category_key
+            if actual_cat != category_key:
+                save_key = actual_cat
+                save_cat = CATEGORIES.index(actual_cat)
+
+            if ctx["prior_vote_category"]:
+                _revert_optimistic_vote(cat, member.id, ticker)
+                await interaction.followup.send(
+                    f"You already voted for ${ticker} this week.",
+                    ephemeral=True,
+                )
+                return
+
+            db_count = int(ctx["vote_count"])
+            if db_count >= limit:
+                _revert_optimistic_vote(cat, member.id, ticker)
+                await interaction.followup.send(
+                    "YOU HAVE REACHED THE LIMIT OF YOUR VOTES. NEXT VOTING OPENS MONDAY 9AM.",
+                    ephemeral=True,
+                )
+                return
+
+            ok, reason = await asyncio.to_thread(
+                database.record_vote,
+                guild.id,
+                week_key,
+                save_key,
+                ticker,
+                member.id,
+                role_at_vote,
+                is_early_window_active() and role_at_vote == "NPC",
+            )
+            if not ok:
+                _revert_optimistic_vote(cat, member.id, ticker)
+                if reason == "duplicate":
+                    await interaction.followup.send(
+                        f"You already voted for ${ticker}.",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.followup.send(
+                        "Your vote could not be saved. Please try again.",
+                        ephemeral=True,
+                    )
+                return
+
+            if save_cat != cat:
+                _revert_optimistic_vote(cat, member.id, ticker)
+                _user_votes[save_cat].setdefault(member.id, set()).add(ticker)
+                _inc_count(save_cat, ticker, +1)
+
+            _record_early_vote_if_applicable(save_cat, member, ticker)
+            _schedule_leaderboard_update(guild, save_cat)
+        except Exception:
+            _revert_optimistic_vote(cat, member.id, ticker)
+            try:
+                await interaction.followup.send(
+                    "Your vote could not be saved. Please try again.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
 
     async def _handle_vote(
         self,
@@ -496,21 +671,28 @@ class WeeklyVotingView(discord.ui.View):
         member: discord.Member = interaction.user
         limit = _vote_limit_for(member)
         role_at_vote = _role_snapshot(member)
+        ticker = ticker.upper().strip().lstrip("$")
 
-        if not database.is_voting_open(guild.id, week_key):
+        if ticker not in self.tickers:
             await interaction.followup.send(
-                "Voting is closed. Next voting opens Monday at 9:00 AM ET.",
+                f"${ticker} is not on this channel's ballot.",
                 ephemeral=True,
             )
             return
 
         user_set = _ensure_user_slot(cat, member.id)
-        db_count = database.user_vote_count(guild.id, week_key, category_key, member.id)
+        mem_count = len(user_set)
+
+        if ticker in user_set:
+            await interaction.followup.send(
+                f"You already voted for ${ticker} in this category.",
+                ephemeral=True,
+            )
+            return
 
         # ---- NPC-special UX: limit==1 ----
         if limit == 1:
-            # If already used their single vote (regardless of ticker), always same message.
-            if db_count >= 1 or len(user_set) >= 1 or ticker in user_set:
+            if mem_count >= 1:
                 reg_mention = _channel_mention_or_text(
                     guild,
                     ["𝐏𝐋𝐀𝐘𝐄𝐑", "player", "register", "registration", "subscribe"],
@@ -524,24 +706,6 @@ class WeeklyVotingView(discord.ui.View):
                 )
                 return
 
-            ok, reason = database.record_vote(
-                guild.id,
-                week_key,
-                category_key,
-                ticker,
-                member.id,
-                role_at_vote,
-                is_early=is_early_window_active() and role_at_vote == "NPC",
-            )
-            if not ok and reason == "duplicate":
-                await interaction.followup.send("You already voted for this ticker.", ephemeral=True)
-                return
-            # First vote: record and send special success message
-            user_set.add(ticker)
-            _inc_count(cat, ticker, +1)
-            # record early-window vote for NPC (if active)
-            _record_early_vote_if_applicable(cat, member, ticker)
-
             reg_mention = _channel_mention_or_text(
                 guild,
                 ["𝐏𝐋𝐀𝐘𝐄𝐑", "player", "register", "registration", "subscribe"],
@@ -551,56 +715,67 @@ class WeeklyVotingView(discord.ui.View):
                 f"YOU HAVE PICKED ${ticker}\n"
                 f"YOU HAVE 1/{limit} PICKS\n"
                 f"Join {reg_mention} to get 5 weekly votes and see live results in real time.",
-                ephemeral=True
+                ephemeral=True,
             )
-            try:
-                await _post_or_update_leaderboard(guild, cat)
-            except Exception:
-                pass
+            user_set.add(ticker)
+            _inc_count(cat, ticker, +1)
+            asyncio.create_task(
+                self._finalize_vote_background(
+                    interaction,
+                    guild=guild,
+                    cat=cat,
+                    category_key=category_key,
+                    week_key=week_key,
+                    ticker=ticker,
+                    member=member,
+                    limit=limit,
+                    role_at_vote=role_at_vote,
+                )
+            )
             return
 
         # ---- Default (PLAYER/ADMIN) behavior ----
-        if ticker in user_set:
-            await interaction.followup.send(
-                f"You already voted for ${ticker} in this category.",
-                ephemeral=True
-            )
-            return
-
-        if db_count >= limit or len(user_set) >= limit:
+        if mem_count >= limit:
             await interaction.followup.send(
                 "YOU HAVE REACHED THE LIMIT OF YOUR VOTES. NEXT VOTING OPENS MONDAY 9AM.",
                 ephemeral=True
             )
             return
 
-        ok, reason = database.record_vote(
-            guild.id,
-            week_key,
-            category_key,
-            ticker,
-            member.id,
-            role_at_vote,
-            is_early=is_early_window_active() and role_at_vote == "NPC",
+        new_count = mem_count + 1
+        await interaction.followup.send(
+            f"YOU HAVE PICKED ${ticker}\nYOU HAVE {new_count}/{limit} PICKS",
+            ephemeral=True,
         )
-        if not ok and reason == "duplicate":
-            await interaction.followup.send(
-                f"You already voted for ${ticker} in this category.",
-                ephemeral=True,
-            )
-            return
         user_set.add(ticker)
         _inc_count(cat, ticker, +1)
-
-        await interaction.followup.send(
-            f"YOU HAVE PICKED ${ticker}\nYOU HAVE {db_count + 1}/{limit} PICKS",
-            ephemeral=True
+        asyncio.create_task(
+            self._finalize_vote_background(
+                interaction,
+                guild=guild,
+                cat=cat,
+                category_key=category_key,
+                week_key=week_key,
+                ticker=ticker,
+                member=member,
+                limit=limit,
+                role_at_vote=role_at_vote,
+            )
         )
 
-        try:
-            await _post_or_update_leaderboard(guild, cat)
-        except Exception:
-            pass
+
+async def build_weekly_voting_view(
+    category_idx: int,
+    tickers: List[str],
+    *,
+    fetch_quotes: bool = True,
+) -> WeeklyVotingView:
+    """Build voting buttons with live prices on each label."""
+    tix = [str(t).strip().lstrip("$").upper() for t in tickers if t][:20]
+    quotes: dict[str, FinnhubQuote] = {}
+    if fetch_quotes and tix:
+        quotes, _ = await asyncio.to_thread(quote_and_names_for_symbols, tix)
+    return WeeklyVotingView(category_idx, tix, quotes)
 
 
 # ===================== Utility: cleanup helpers =====================
@@ -654,90 +829,87 @@ def _format_tminus(end_utc: datetime, now_utc: Optional[datetime] = None) -> str
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def _banner_description_with_timer(end_utc: Optional[datetime]) -> str:
-    base = "Pick your favorite ticker from the subscriber-selected weekly list."
+def _banner_description_with_timer(cat: int, end_utc: Optional[datetime]) -> str:
+    live_ch = _category_idx_to_live_name(cat)
+    base = (
+        f"This week’s **{_category_title(cat)}** game is in the **vote stage**.\n\n"
+        "**What to do:** press a **button below** to vote for that stock. "
+        "Each button shows the ticker and its current price.\n\n"
+        f"**Live leaderboard:** #{live_ch}\n"
+        "• **NPC** — 1 vote in this category\n"
+        "• **PLAYER / WINNER** — up to 5 votes (different tickers)"
+    )
     if end_utc is None:
         return base
     et_str = _format_et(end_utc)
     unix = int(end_utc.timestamp())
-    # include Discord dynamic stamps (absolute + relative) and a live T-minus line we will keep updating
     return (
         f"{base}\n\n"
-        f"**Early Winners Window ends:** {et_str} — <t:{unix}:F> • <t:{unix}:R>\n"
+        f"**Early winner window ends:** {et_str} — <t:{unix}:F> • <t:{unix}:R>\n"
         f"⏳ **T‑minus:** {_format_tminus(end_utc)}"
     )
 
 
 def _build_voting_open_embed(cat: int, end_utc: Optional[datetime]) -> discord.Embed:
+    color = _ROSTER_COLORS[cat] if cat < len(_ROSTER_COLORS) else discord.Color.blue()
     emb = discord.Embed(
         title="VOTING OPEN",
-        description=_banner_description_with_timer(end_utc),
-        color=discord.Color.blue(),
+        description=_banner_description_with_timer(cat, end_utc),
+        color=color,
     )
     emb.set_author(name=_category_title(cat))
     return emb
 
 
-async def _build_voting_roster_embed(cat: int, tickers: List[str]) -> discord.Embed:
-    """Second card under the voting banner: all choices with company name + live quote."""
-    tix = [str(t).strip().lstrip("$").upper() for t in tickers if t][:20]
-    color = _ROSTER_COLORS[cat] if cat < len(_ROSTER_COLORS) else discord.Color.dark_teal()
-    if not tix:
-        return discord.Embed(
-            title=f"📋 {_category_title(cat)}",
-            description="No tickers in this category for this week.",
-            color=color,
-        )
-    quotes, names = await asyncio.to_thread(quote_and_names_for_symbols, tix)
-
-    def row(sym: str) -> str:
-        nm = _truncate(names.get(sym, "") or "", 38) or "—"
-        q = format_quote(sym, quotes.get(sym))
-        return f"**{sym}**\n{nm}\n_{q}_"
-
-    lines = [row(s) for s in tix]
-    emb = discord.Embed(
-        title=f"📋 {_category_title(cat)} — names & prices",
-        description="Use the **vote buttons** below this card.",
-        color=color,
-    )
-    first = "\n\n".join(lines[:10])
-    emb.add_field(name="Choices 1 — 10", value=first[:1024] or "—", inline=True)
-    if len(lines) > 10:
-        second = "\n\n".join(lines[10:20])
-        emb.add_field(name="Choices 11 — 20", value=second[:1024], inline=True)
-    return emb
-
-
 async def build_final_leaderboard_embeds(guild_id: int, week_key: str) -> list[discord.Embed]:
-    """End-of-week board: one rich embed per category would exceed limits — single embed with three fields."""
+    """End-of-week board: one embed (and Discord message) per cap category."""
+    await asyncio.to_thread(reconcile_ticker_categories, guild_id, week_key)
     counts = database.all_vote_counts(guild_id, week_key)
     all_syms: list[str] = []
     for cat in ("small", "mid", "blue"):
         all_syms.extend(t for t, _ in counts[cat])
     quotes, names = await asyncio.to_thread(quote_and_names_for_symbols, all_syms)
 
-    main = discord.Embed(
-        title="FINAL WEEKLY LEADERBOARD",
-        description="Results for this week — **symbol**, **company**, **price**, **votes**.",
-        color=discord.Color.gold(),
-    )
-    for cat_key in ("small", "mid", "blue"):
+    embeds: list[discord.Embed] = []
+    for cat_idx, cat_key in enumerate(("small", "mid", "blue")):
         title = CATEGORY_TITLES[cat_key]
+        color = (
+            _ROSTER_COLORS[cat_idx]
+            if cat_idx < len(_ROSTER_COLORS)
+            else discord.Color.gold()
+        )
         rows = counts[cat_key]
         if not rows:
-            main.add_field(name=title, value="No votes.", inline=False)
+            embeds.append(
+                discord.Embed(
+                    title=f"FINAL WEEKLY LEADERBOARD — {title}",
+                    description="No votes this week.",
+                    color=color,
+                )
+            )
             continue
-        block: list[str] = []
+
+        lines: list[str] = []
         for rank, (ticker, total) in enumerate(rows, start=1):
             nm = _truncate(names.get(ticker, "") or "", 30) or "—"
             q = format_quote(ticker, quotes.get(ticker))
-            block.append(f"**{rank}.** `${ticker}` · {nm}\n    {q} · **{total}**")
-        val = "\n\n".join(block)
-        if len(val) > 1024:
-            val = "\n\n".join(block[:8]) + "\n\n… *list continues in vote history*"
-        main.add_field(name=title, value=val[:1024], inline=False)
-    return [main]
+            lines.append(f"**{rank}.** `${ticker}` · {nm}\n    {q} · **{total}**")
+
+        desc = "\n\n".join(lines)
+        if len(desc) > 4000:
+            desc = "\n\n".join(lines[:12]) + "\n\n… *list truncated*"
+
+        embeds.append(
+            discord.Embed(
+                title=f"FINAL WEEKLY LEADERBOARD — {title}",
+                description=(
+                    "Results for this week — **symbol**, **company**, **price**, **votes**.\n\n"
+                    f"{desc}"
+                ),
+                color=color,
+            )
+        )
+    return embeds
 
 
 async def _get_or_cache_voting_open_message(guild: discord.Guild, cat: int) -> Optional[discord.Message]:
@@ -781,15 +953,86 @@ class WeeklyPicksCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._timer_task: Optional[asyncio.Task] = None
+        self._reconcile_task: Optional[asyncio.Task] = None
 
     async def cog_load(self):
         # start the countdown updater loop
         self._timer_task = asyncio.create_task(
             self._countdown_updater(), name="weekly_countdown_updater")
+        self._reconcile_task = asyncio.create_task(
+            self._category_reconcile_loop(), name="weekly_category_reconcile")
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        week_key = database.week_key_for()
+        for guild in self.bot.guilds:
+            open_ = await asyncio.to_thread(
+                database.is_voting_open, guild.id, week_key
+            )
+            if open_:
+                await asyncio.to_thread(hydrate_vote_state, guild.id, week_key)
 
     def cog_unload(self):
-        if self._timer_task and not self._timer_task.done():
-            self._timer_task.cancel()
+        for task in (self._timer_task, self._reconcile_task):
+            if task and not task.done():
+                task.cancel()
+
+    async def apply_category_moves(self, guild: discord.Guild, moves: list[CategoryMove]) -> None:
+        """Sync in-memory vote tallies and refresh vote buttons on affected channels."""
+        if not moves:
+            return
+        affected: set[str] = set()
+        for move in moves:
+            affected.add(move.from_category)
+            affected.add(move.to_category)
+            try:
+                from_idx = CATEGORIES.index(move.from_category)
+                to_idx = CATEGORIES.index(move.to_category)
+            except ValueError:
+                continue
+            for uid, tickers in list(_user_votes[from_idx].items()):
+                if move.ticker in tickers:
+                    tickers.discard(move.ticker)
+                    _user_votes[to_idx].setdefault(uid, set()).add(move.ticker)
+            count = _vote_counts[from_idx].pop(move.ticker, 0)
+            if count:
+                _vote_counts[to_idx][move.ticker] = _vote_counts[to_idx].get(move.ticker, 0) + count
+
+        week_key = database.week_key_for()
+        lists = database.list_tickers(guild.id, week_key)
+        for cat_name in affected:
+            try:
+                cat_idx = CATEGORIES.index(cat_name)
+            except ValueError:
+                continue
+            tickers = lists.get(cat_name, [])
+            view = await build_weekly_voting_view(cat_idx, tickers, fetch_quotes=False)
+            self.bot.add_view(view)
+            msg = await _get_or_cache_voting_open_message(guild, cat_idx)
+            if msg:
+                try:
+                    await msg.edit(view=view)
+                except Exception:
+                    pass
+            _schedule_leaderboard_update(guild, cat_idx)
+
+    async def _category_reconcile_loop(self) -> None:
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            try:
+                for guild in self.bot.guilds:
+                    week_key = database.week_key_for()
+                    if not database.is_voting_open(guild.id, week_key):
+                        continue
+                    moves = await asyncio.to_thread(
+                        reconcile_ticker_categories, guild.id, week_key
+                    )
+                    await self.apply_category_moves(guild, moves)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                pass
+            await asyncio.sleep(300)
 
     # --- ADMIN helper: sanity-check layout; tiny, non-invasive test command ---
     @commands.command(name="weekly_status")
@@ -922,16 +1165,13 @@ class WeeklyPicksCog(commands.Cog):
                 counts[t] = counts.get(t, 0)
 
             # Build view + VOTING OPEN banner + roster card (names & prices)
-            view = WeeklyVotingView(category_idx=cat, tickers=tickers)
             banner = _build_voting_open_embed(cat, end_utc)
-            embeds_out: list[discord.Embed] = [banner]
-            roster = await _build_voting_roster_embed(cat, tickers)
-            embeds_out.append(roster)
+            view = await build_weekly_voting_view(cat, tickers)
 
             try:
                 # Clean old bot messages first so only the new banner remains
                 await _delete_bot_messages(ch, ctx.guild, limit=400)
-                sent = await ch.send(embeds=embeds_out[:10], view=view)
+                sent = await ch.send(embed=banner, view=view)
                 _voting_open_msg_ids.setdefault(
                     ctx.guild.id, {})[cat] = sent.id
                 updated += 1
@@ -1084,30 +1324,19 @@ class WeeklyPicksCog(commands.Cog):
     # ---------------- Countdown updater (runs every ~60s during early window) ----------------
 
     async def _update_all_guild_banners_once(self):
-        """Refresh the timer on VOTING OPEN and keep the roster card in sync (names & prices)."""
+        """Refresh the timer on the VOTING OPEN instruction card."""
         end = early_window_end_utc()
         if end is None:
             return
-        cat_keys = ("small", "mid", "blue")
         for guild in list(self.bot.guilds):
-            week_key = database.week_key_for()
-            stored = database.list_tickers(guild.id, week_key)
             for cat in range(3):
                 msg = await _get_or_cache_voting_open_message(guild, cat)
                 if not msg:
                     continue
                 try:
-                    banner = _build_voting_open_embed(cat, end)
-                    tickers = stored.get(cat_keys[cat], [])
-                    embeds_out: list[discord.Embed] = [banner]
-                    if tickers:
-                        embeds_out.append(await _build_voting_roster_embed(cat, tickers))
-                    await msg.edit(embeds=embeds_out[:10])
+                    await msg.edit(embed=_build_voting_open_embed(cat, end))
                 except Exception:
-                    try:
-                        await msg.edit(embed=_build_voting_open_embed(cat, end))
-                    except Exception:
-                        pass
+                    pass
 
     async def _countdown_updater(self):
         await self.bot.wait_until_ready()

@@ -22,6 +22,7 @@ from config import (
     ROLE_WINNER,
     TICKER_LIMIT_PER_CATEGORY,
 )
+from services.finnhub_client import validate_symbol_for_category as finnhub_validate_symbol
 from services.yahoo_client import (
     category_for_channel,
     search_symbols_by_query,
@@ -100,6 +101,8 @@ def example_select_options(category: str, start: int, end: int) -> List[discord.
 _picks_done: set[Tuple[int, int]] = set()
 # Who has an open picker right now: (channel_id, user_id) -> [message_ids]
 _picker_open: Dict[Tuple[int, int], List[int]] = {}
+# guild_id -> pick-results message id (avoids scanning channel history each submit)
+_pick_results_msg_id: Dict[int, int] = {}
 
 
 def reset_picker_runtime_state() -> None:
@@ -172,10 +175,20 @@ async def _ensure_pick_results_message(guild: discord.Guild) -> tuple[discord.Me
     pr_ch = await _get_pick_results_channel(guild)
     if pr_ch is None:
         return None
+    cached_id = _pick_results_msg_id.get(guild.id)
+    if cached_id:
+        try:
+            msg = await pr_ch.fetch_message(cached_id)
+            if msg.embeds:
+                return msg, msg.embeds[0]
+        except Exception:
+            _pick_results_msg_id.pop(guild.id, None)
     found = await _find_pick_results_message(pr_ch)
     if found:
+        _pick_results_msg_id[guild.id] = found[0].id
         return found
     msg = await pr_ch.send(embed=_pick_results_embed_scaffold())
+    _pick_results_msg_id[guild.id] = msg.id
     return msg, msg.embeds[0]
 
 
@@ -217,15 +230,15 @@ async def _try_add_ticker_to_pick_results(
     submitted_by: int | None = None,
     market_cap: int | None = None,
     exchange: str | None = None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, int | None]:
     """
-    Returns (ok, reason). reason ∈ {'not_found', 'duplicate', 'full', 'ok'}
+    Returns (ok, reason, category_count). reason ∈ {'not_found', 'duplicate', 'full', 'ok', ...}
     """
     week_key = database.ticker_selection_week_key_for()
     category_key = _category_key_for_idx(category_idx)
     found = await _ensure_pick_results_message(guild)
     if not found:
-        return False, "not_found"
+        return False, "not_found", None
     msg, emb = found
 
     if submitted_by is not None:
@@ -239,22 +252,22 @@ async def _try_add_ticker_to_pick_results(
             exchange=exchange,
         )
         if not ok:
-            return False, reason
+            return False, reason, None
     # ensure 3 fields
     while len(emb.fields) < 3:
         emb.add_field(name="—", value="—", inline=False)
 
     field = emb.fields[category_idx]
-    current = database.list_tickers(guild.id, week_key, category_key)[category_key]
-    if submitted_by is None:
-        current = _parse_field_lines(field.value)
-        t = ticker.upper()
-        if t in current:
-            return False, "duplicate"
-        if len(current) >= TICKER_LIMIT_PER_CATEGORY:
-            return False, "full"
-        current.append(t)
+    current = _parse_field_lines(field.value)
     t = ticker.upper()
+    if submitted_by is None:
+        if t in current:
+            return False, "duplicate", len(current)
+        if len(current) >= TICKER_LIMIT_PER_CATEGORY:
+            return False, "full", len(current)
+        current.append(t)
+    elif t not in current:
+        current.append(t)
 
     # update the field name with count
     base_name = _category_title_for_idx(category_idx)
@@ -282,7 +295,7 @@ async def _try_add_ticker_to_pick_results(
                 )
 
     await msg.edit(embed=new_emb)
-    return True, "ok"
+    return True, "ok", len(current)
 
 
 # --------- closed-channel helpers (read-only; no side effects) ---------
@@ -501,6 +514,10 @@ class StockPickerView(discord.ui.View):
         if prefix_examples:
             return example_row(prefix_examples[0])
 
+        finnhub_row = finnhub_validate_symbol(q, category)
+        if finnhub_row:
+            return q, finnhub_row
+
         candidate_symbols: list[str] = []
 
         rows = search_symbols_by_query(q, category=category, limit=10)
@@ -527,6 +544,12 @@ class StockPickerView(discord.ui.View):
                 await interaction.response.defer(ephemeral=True)
         except discord.InteractionResponded:
             pass
+
+        if self.frozen:
+            await interaction.followup.send(
+                "You already submitted a ticker for this channel.", ephemeral=True
+            )
+            return
 
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await interaction.followup.send("This can only be used in a server.", ephemeral=True)
@@ -561,117 +584,153 @@ class StockPickerView(discord.ui.View):
         except Exception:
             pass
 
-        if already_picked or self.frozen:
+        if already_picked:
             await interaction.followup.send(
                 "You already submitted a ticker for this channel.", ephemeral=True
             )
             return
 
-        completed = self._complete_ticker(query)
-        if not completed:
-            await interaction.followup.send(
-                "Could not complete that input to a valid stock for this category. "
-                "You can press **Try Ticker** again and enter another ticker.",
-                ephemeral=True,
+        typed = query.upper().strip().lstrip("$")
+        status_msg = await interaction.followup.send(
+            f"YOU HAVE PICKED **${typed}**\nSaving your submission…",
+            ephemeral=True,
+            wait=True,
+        )
+        asyncio.create_task(
+            self._finish_ticker_submit(
+                interaction,
+                status_msg=status_msg,
+                query=query,
+                typed=typed,
+                key=key,
             )
-            return
-
-        ticker, market_row = completed
-        cat_idx = _category_index_for_channel(self.channel)
-        ok, reason = await _try_add_ticker_to_pick_results(
-            guild=interaction.guild,
-            category_idx=cat_idx,
-            ticker=ticker,
-            submitted_by=interaction.user.id,
-            market_cap=market_row.get("marketCap"),
-            exchange=market_row.get("exchange"),
         )
 
-        if not ok:
-            if reason == "not_found":
-                await interaction.followup.send(
-                    f"Could not locate the **{CHANNEL_PICK_RESULTS}** embed. Ask an admin to run `!prep_pick_results_demo`.",
-                    ephemeral=True
+    async def _finish_ticker_submit(
+        self,
+        interaction: discord.Interaction,
+        *,
+        status_msg: discord.Message,
+        query: str,
+        typed: str,
+        key: Tuple[int, int],
+    ) -> None:
+        try:
+            completed = await asyncio.to_thread(self._complete_ticker, query)
+            if not completed:
+                await status_msg.edit(
+                    content=(
+                        "Could not complete that input to a valid stock for this category. "
+                        "Press **Try Ticker** again and enter another symbol."
+                    )
                 )
                 return
-            if reason in {"duplicate", "user_already_picked"}:
-                await interaction.followup.send(
-                    "That ticker is already listed, or you already submitted for this category.",
-                    ephemeral=True
-                )
+
+            ticker, market_row = completed
+            cat_idx = _category_index_for_channel(self.channel)
+            ok, reason, count_now = await _try_add_ticker_to_pick_results(
+                guild=interaction.guild,
+                category_idx=cat_idx,
+                ticker=ticker,
+                submitted_by=interaction.user.id,
+                market_cap=market_row.get("marketCap"),
+                exchange=market_row.get("exchange"),
+            )
+
+            if not ok:
+                if reason == "not_found":
+                    await status_msg.edit(
+                        content=(
+                            f"Could not locate the **{CHANNEL_PICK_RESULTS}** embed. "
+                            "Ask an admin to run `!prep_pick_results_demo`."
+                        )
+                    )
+                    return
+                if reason in {"duplicate", "user_already_picked"}:
+                    await status_msg.edit(
+                        content=(
+                            "That ticker is already listed, or you already submitted for this category."
+                        )
+                    )
+                    return
+                if reason == "full":
+                    self.frozen = True
+                    self.submit_btn.disabled = True
+                    try:
+                        if self.message_id:
+                            await interaction.followup.edit_message(
+                                self.message_id, view=self
+                            )
+                    except Exception:
+                        pass
+                    await status_msg.edit(
+                        content=(
+                            f"This category already has {TICKER_LIMIT_PER_CATEGORY} unique tickers. "
+                            "Please try a different channel."
+                        )
+                    )
+                    return
+                await status_msg.edit(content="Submission failed. Please try again.")
                 return
-            if reason == "full":
-                self.frozen = True
-                self.submit_btn.disabled = True
+
+            try:
+                if shared_state:
+                    if hasattr(shared_state, "set_user_pick"):
+                        shared_state.set_user_pick(
+                            self.channel.id, interaction.user.id, ticker
+                        )
+                    elif hasattr(shared_state, "record_user_pick"):
+                        shared_state.record_user_pick(
+                            self.channel.id, interaction.user.id, ticker
+                        )
+            except Exception:
+                pass
+
+            _picks_done.add(key)
+            self.frozen = True
+            self.submit_btn.disabled = True
+
+            try:
+                if self.message_id:
+                    await interaction.followup.edit_message(self.message_id, view=self)
+            except Exception:
+                pass
+
+            _picker_open.pop((self.channel.id, interaction.user.id), None)
+
+            if count_now is not None and count_now >= TICKER_LIMIT_PER_CATEGORY:
                 try:
-                    if self.message_id:
-                        await interaction.followup.edit_message(self.message_id, view=self)
+                    await self.channel.send(
+                        embed=_closed_banner_embed(interaction.guild, count=count_now)
+                    )
                 except Exception:
                     pass
-                await interaction.followup.send(
-                    f"This category already has {TICKER_LIMIT_PER_CATEGORY} unique tickers. Please try a different channel.",
-                    ephemeral=True
+                try:
+                    await _post_mod_log_submission_closed(
+                        guild=interaction.guild,
+                        cat_idx=cat_idx,
+                        ch=self.channel,
+                        count=count_now,
+                        triggered_by=interaction.user
+                        if isinstance(interaction.user, discord.Member)
+                        else None,
+                    )
+                except Exception:
+                    pass
+
+            completed_note = (
+                f"Completed `{typed}` to `${ticker}`. " if typed != ticker else ""
+            )
+            await status_msg.edit(
+                content=f"{completed_note}Ticker **${ticker}** has been submitted."
+            )
+        except Exception:
+            try:
+                await status_msg.edit(
+                    content="Something went wrong while saving. Please try again."
                 )
-                return
-
-        # success path — record & freeze UI
-        try:
-            if shared_state:
-                if hasattr(shared_state, "set_user_pick"):
-                    shared_state.set_user_pick(
-                        self.channel.id, interaction.user.id, ticker)
-                elif hasattr(shared_state, "record_user_pick"):
-                    shared_state.record_user_pick(
-                        self.channel.id, interaction.user.id, ticker)
-        except Exception:
-            pass
-
-        _picks_done.add(key)
-        self.frozen = True
-        self.submit_btn.disabled = True
-
-        try:
-            if self.message_id:
-                await interaction.followup.edit_message(self.message_id, view=self)
-        except Exception:
-            pass
-
-        _picker_open.pop((self.channel.id, interaction.user.id), None)
-
-        # If adding this ticker filled the category, broadcast banner + log to #mod.
-        try:
-            pr_ch = await _get_pick_results_channel(interaction.guild)
-            if pr_ch:
-                found = await _find_pick_results_message(pr_ch)
-                if found:
-                    _, pr_emb = found
-                    if cat_idx < len(pr_emb.fields):
-                        count_now = len(_parse_field_lines(
-                            pr_emb.fields[cat_idx].value))
-                        if count_now >= TICKER_LIMIT_PER_CATEGORY:
-                            # 1) Post closed banner to THIS ticker channel
-                            try:
-                                await self.channel.send(embed=_closed_banner_embed(interaction.guild, count=count_now))
-                            except Exception:
-                                pass
-                            # 2) Log to #mod
-                            try:
-                                await _post_mod_log_submission_closed(
-                                    guild=interaction.guild,
-                                    cat_idx=cat_idx,
-                                    ch=self.channel,
-                                    count=count_now,
-                                    triggered_by=interaction.user if isinstance(
-                                        interaction.user, discord.Member) else None,
-                                )
-                            except Exception:
-                                pass
-        except Exception:
-            pass
-
-        typed = query.upper().strip().lstrip("$")
-        completed = f"Completed `{typed}` to `${ticker}`. " if typed != ticker else ""
-        await interaction.followup.send(f"{completed}Ticker ${ticker} has been submitted.", ephemeral=True)
+            except Exception:
+                pass
 
 
 # ===== TESTING VARIANT (does NOT enforce one-submission-per-user) =====
@@ -696,7 +755,7 @@ class TestingStockPickerView(StockPickerView):
         ticker = self.select.values[0].upper()
 
         cat_idx = _category_index_for_channel(self.channel)
-        ok, reason = await _try_add_ticker_to_pick_results(
+        ok, reason, count_now = await _try_add_ticker_to_pick_results(
             guild=interaction.guild, category_idx=cat_idx, ticker=ticker
         )
 
@@ -741,34 +800,25 @@ class TestingStockPickerView(StockPickerView):
 
         _picker_open.pop((self.channel.id, interaction.user.id), None)
 
-        # mirror the auto-close + log behavior here too
-        try:
-            pr_ch = await _get_pick_results_channel(interaction.guild)
-            if pr_ch:
-                found = await _find_pick_results_message(pr_ch)
-                if found:
-                    _, pr_emb = found
-                    if cat_idx < len(pr_emb.fields):
-                        count_now = len(_parse_field_lines(
-                            pr_emb.fields[cat_idx].value))
-                        if count_now >= 20:
-                            try:
-                                await self.channel.send(embed=_closed_banner_embed(interaction.guild, count=count_now))
-                            except Exception:
-                                pass
-                            try:
-                                await _post_mod_log_submission_closed(
-                                    guild=interaction.guild,
-                                    cat_idx=cat_idx,
-                                    ch=self.channel,
-                                    count=count_now,
-                                    triggered_by=interaction.user if isinstance(
-                                        interaction.user, discord.Member) else None,
-                                )
-                            except Exception:
-                                pass
-        except Exception:
-            pass
+        if count_now is not None and count_now >= TICKER_LIMIT_PER_CATEGORY:
+            try:
+                await self.channel.send(
+                    embed=_closed_banner_embed(interaction.guild, count=count_now)
+                )
+            except Exception:
+                pass
+            try:
+                await _post_mod_log_submission_closed(
+                    guild=interaction.guild,
+                    cat_idx=cat_idx,
+                    ch=self.channel,
+                    count=count_now,
+                    triggered_by=interaction.user
+                    if isinstance(interaction.user, discord.Member)
+                    else None,
+                )
+            except Exception:
+                pass
 
         await interaction.followup.send(f"Ticker ${ticker} has been submitted.", ephemeral=True)
 
@@ -871,23 +921,20 @@ class OpenPickerView(discord.ui.View):
 
     @discord.ui.button(label="Open Picker", style=discord.ButtonStyle.primary, custom_id="pre_voting:open_picker")
     async def open_picker(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.InteractionResponded:
+            pass
+
         key = (self.channel.id, interaction.user.id)
         try:
             if not isinstance(interaction.user, discord.Member) or not _can_choose_weekly_ticker(interaction.user):
-                try:
-                    await interaction.response.defer(ephemeral=True)
-                except discord.InteractionResponded:
-                    pass
                 await interaction.followup.send(
                     "Only PLAYER subscribers, active WINNERS, and admins can choose weekly tickers.",
                     ephemeral=True,
                 )
                 return
             if await _is_channel_closed(self.channel):
-                try:
-                    await interaction.response.defer(ephemeral=True)
-                except discord.InteractionResponded:
-                    pass
                 await interaction.followup.send(
                     f"This category already has {TICKER_LIMIT_PER_CATEGORY} unique tickers and is closed for this week.",
                     ephemeral=True
@@ -916,10 +963,6 @@ class OpenPickerView(discord.ui.View):
                 pass
 
             if already_picked:
-                try:
-                    await interaction.response.defer(ephemeral=True)
-                except discord.InteractionResponded:
-                    pass
                 await interaction.followup.send(
                     "You already submitted a ticker for this channel.",
                     ephemeral=True
@@ -928,10 +971,6 @@ class OpenPickerView(discord.ui.View):
 
             open_list = _picker_open.get(key, [])
             if open_list:
-                try:
-                    await interaction.response.defer(ephemeral=True)
-                except discord.InteractionResponded:
-                    pass
                 await interaction.followup.send(
                     "You already have an open picker for this channel.",
                     ephemeral=True
@@ -942,11 +981,6 @@ class OpenPickerView(discord.ui.View):
 
             view = StockPickerView(channel=self.channel,
                                    user_id=interaction.user.id)
-
-            try:
-                await interaction.response.defer(ephemeral=True)
-            except discord.InteractionResponded:
-                pass
 
             sent = await interaction.followup.send(
                 content=(

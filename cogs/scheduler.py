@@ -17,6 +17,7 @@ import discord
 from discord.ext import commands
 
 import database
+from services.category_reconcile import reconcile_ticker_categories
 from config import (
     CATEGORY_TITLES,
     CHANNEL_BLUE_LIVE,
@@ -38,8 +39,7 @@ from config import (
 from cogs.weekly_picks import (
     arm_early_window,
     is_early_window_active,
-    WeeklyVotingView,
-    _build_voting_roster_embed,
+    build_weekly_voting_view,
     build_final_leaderboard_embeds,
     _post_or_update_leaderboard,
     _category_idx_to_weekly_name,
@@ -258,6 +258,7 @@ class SchedulerCog(commands.Cog):
         )
 
         # 2) Read current ticker selections from Supabase, with #pic-results as fallback.
+        await asyncio.to_thread(reconcile_ticker_categories, guild.id, week_key)
         stored = database.list_tickers(guild.id, week_key)
         lists: List[List[str]] = [stored["small"], stored["mid"], stored["blue"]]
         pr_msg = None
@@ -293,9 +294,6 @@ class SchedulerCog(commands.Cog):
 
             # Build the banner using the same builder as weekly_picks (includes ⏳ T-minus).
             banner = _build_voting_open_embed(cat, end_utc)
-            embeds_out: list[discord.Embed] = [banner]
-            if tickers:
-                embeds_out.append(await _build_voting_roster_embed(cat, tickers))
             if not tickers:
                 # Voting is only from subscriber-selected tickers.
                 original = banner.description or ""
@@ -303,9 +301,9 @@ class SchedulerCog(commands.Cog):
                 tail = parts[1] if len(parts) > 1 else ""
                 banner.description = f"**NO TICKERS SELECTED THIS WEEK**\n\n{tail}"
 
-            view = WeeklyVotingView(category_idx=cat, tickers=tickers)
+            view = await build_weekly_voting_view(cat, tickers) if tickers else None
             try:
-                await ch.send(embeds=embeds_out[:10], view=view)
+                await ch.send(embed=banner, view=view)
                 updated += 1
             except Exception:
                 continue
@@ -564,6 +562,7 @@ class SchedulerCog(commands.Cog):
     async def _friday_close_one_guild(self, guild: discord.Guild) -> None:
         now_utc = _now_utc()
         week_key = database.week_key_for(now_utc)
+        await asyncio.to_thread(reconcile_ticker_categories, guild.id, week_key)
         database.set_cycle_phase(
             guild.id,
             week_key,
@@ -588,8 +587,8 @@ class SchedulerCog(commands.Cog):
         leaderboard = _find_text_channel(guild, CHANNEL_FINAL_LEADERBOARD)
         if leaderboard:
             final_embeds = await build_final_leaderboard_embeds(guild.id, week_key)
-            if final_embeds:
-                await leaderboard.send(embeds=final_embeds[:10])
+            for emb in final_embeds:
+                await leaderboard.send(embed=emb)
 
         await self._expire_winners(guild)
 

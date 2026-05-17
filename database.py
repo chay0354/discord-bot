@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
@@ -267,6 +268,132 @@ def list_tickers(guild_id: int, week_key: str, category: str | None = None) -> d
     for row in rows:
         out[row["category"]].append(row["ticker"])
     return out
+
+
+def list_ticker_pick_rows(guild_id: int, week_key: str) -> list[dict[str, Any]]:
+    return _select(
+        "ticker_picks",
+        (
+            f"?select=id,category,ticker,market_cap"
+            f"&guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
+            f"&order=ticker.asc"
+        ),
+    )
+
+
+def ticker_in_category(guild_id: int, week_key: str, category: str, ticker: str) -> bool:
+    sym = ticker.upper().strip().lstrip("$")
+    rows = _select(
+        "ticker_picks",
+        (
+            f"?select=id&guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
+            f"&category=eq.{category}&ticker=eq.{sym}&limit=1"
+        ),
+    )
+    return bool(rows)
+
+
+def update_ticker_pick_category(
+    pick_id: int,
+    category: str,
+    market_cap: int | None = None,
+) -> None:
+    body: dict[str, Any] = {"category": category}
+    if market_cap is not None:
+        body["market_cap"] = market_cap
+    _request("PATCH", "ticker_picks", query=f"?id=eq.{pick_id}", json_body=body)
+
+
+def update_ticker_pick_market_cap(pick_id: int, market_cap: int) -> None:
+    _request(
+        "PATCH",
+        "ticker_picks",
+        query=f"?id=eq.{pick_id}",
+        json_body={"market_cap": market_cap},
+    )
+
+
+def delete_ticker_pick(pick_id: int) -> None:
+    _request("DELETE", "ticker_picks", query=f"?id=eq.{pick_id}")
+
+
+def move_votes_for_ticker(
+    guild_id: int,
+    week_key: str,
+    ticker: str,
+    from_category: str,
+    to_category: str,
+) -> None:
+    if from_category == to_category:
+        return
+    sym = ticker.upper().strip().lstrip("$")
+    _request(
+        "PATCH",
+        "votes",
+        query=(
+            f"?guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
+            f"&ticker=eq.{sym}&category=eq.{from_category}"
+        ),
+        json_body={"category": to_category},
+    )
+
+
+def ticker_pick_category(guild_id: int, week_key: str, ticker: str) -> str | None:
+    sym = ticker.upper().strip().lstrip("$")
+    rows = _select(
+        "ticker_picks",
+        (
+            f"?select=category&guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
+            f"&ticker=eq.{sym}&limit=1"
+        ),
+    )
+    return rows[0]["category"] if rows else None
+
+
+def vote_button_context(
+    guild_id: int,
+    week_key: str,
+    category: str,
+    user_id: int,
+    ticker: str,
+) -> dict[str, Any]:
+    """Parallel Supabase reads for vote validation (used after instant UI ack)."""
+    sym = ticker.upper().strip().lstrip("$")
+    cycle = ensure_cycle(guild_id, week_key)
+    voting_open = bool(cycle.get("voting_open"))
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        fut_cat = pool.submit(ticker_pick_category, guild_id, week_key, sym)
+        fut_count = pool.submit(user_vote_count, guild_id, week_key, category, user_id)
+        fut_prior = pool.submit(user_voted_ticker, guild_id, week_key, user_id, sym)
+        return {
+            "voting_open": voting_open,
+            "actual_category": fut_cat.result(),
+            "vote_count": fut_count.result(),
+            "prior_vote_category": fut_prior.result(),
+        }
+
+
+def fetch_week_vote_rows(guild_id: int, week_key: str) -> list[dict[str, Any]]:
+    return _select(
+        "votes",
+        (
+            f"?select=category,ticker,user_id"
+            f"&guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
+        ),
+    )
+
+
+def user_voted_ticker(guild_id: int, week_key: str, user_id: int, ticker: str) -> str | None:
+    """Category where this user already voted for ticker, if any."""
+    sym = ticker.upper().strip().lstrip("$")
+    rows = _select(
+        "votes",
+        (
+            f"?select=category&guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
+            f"&user_id=eq.{user_id}&ticker=eq.{sym}&limit=1"
+        ),
+    )
+    return rows[0]["category"] if rows else None
 
 
 def add_ticker_pick(

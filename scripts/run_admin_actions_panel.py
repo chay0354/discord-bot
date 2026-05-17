@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from dotenv import load_dotenv
 
 load_dotenv(ROOT / ".env")
+load_dotenv(ROOT.parent / ".env")
 
 import discord
 from discord.ext import commands
@@ -20,7 +21,7 @@ from discord.ext import commands
 import database
 from cogs.admin_actions import AdminActionsView, admin_actions_embed
 from cogs.scheduler import SchedulerCog
-from cogs.weekly_picks import WeeklyPicksCog, WeeklyVotingView
+from cogs.weekly_picks import WeeklyPicksCog, build_weekly_voting_view, hydrate_vote_state
 from config import CHANNEL_ADMIN_ACTIONS, ROLE_ADMIN
 
 
@@ -101,11 +102,12 @@ class AdminActionsPanelBot(commands.Bot):
                 week_key = database.week_key_for()
                 cycle = database.ensure_cycle(guild.id, week_key)
                 if cycle.get("voting_open"):
+                    await asyncio.to_thread(hydrate_vote_state, guild.id, week_key)
                     selected = database.list_tickers(guild.id, week_key)
                     for idx, category in enumerate(("small", "mid", "blue")):
                         tickers = selected.get(category, [])
                         if tickers:
-                            self.add_view(WeeklyVotingView(category_idx=idx, tickers=tickers))
+                            self.add_view(await build_weekly_voting_view(idx, tickers))
                     print(f"Voting button handlers registered in {guild.name}", flush=True)
                 else:
                     await scheduler._reopen_ticker_channels(guild)
