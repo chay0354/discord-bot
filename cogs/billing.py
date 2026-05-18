@@ -66,8 +66,10 @@ class BillingCog(commands.Cog):
     async def cog_load(self) -> None:
         settings = StripeSettings()
         api_port = int(os.getenv("PORT", os.getenv("CRM_API_PORT", "8000")))
-        # Railway exposes one port (PORT). CRM API uses it; webhook is on POST /stripe/webhook there.
-        if STRIPE_WEBHOOK_PORT == api_port:
+        webhook_port = int(os.getenv("STRIPE_WEBHOOK_PORT", str(STRIPE_WEBHOOK_PORT)))
+        # PaaS (Railway, etc.) exposes one PORT; never bind a second listener on it.
+        use_api_webhook = bool(os.getenv("PORT")) or webhook_port == api_port
+        if use_api_webhook:
             print(
                 f"[billing] Stripe webhook on CRM API at POST /stripe/webhook (port {api_port})",
                 flush=True,
