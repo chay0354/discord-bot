@@ -4,12 +4,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import app_state
 from api.auth import require_admin_key
 from game_control import (
     get_audit_logs,
@@ -50,6 +51,26 @@ class ActionBody(BaseModel):
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/stripe/webhook")
+async def stripe_webhook(request: Request) -> dict[str, bool]:
+    """Stripe endpoint when CRM API shares Railway PORT (no second listener)."""
+    from cogs.billing import BillingCog
+
+    bot = app_state.bot
+    if not bot or not app_state.bot_ready:
+        raise HTTPException(status_code=503, detail="Discord bot is not ready")
+    cog = bot.get_cog("BillingCog")
+    if not isinstance(cog, BillingCog):
+        raise HTTPException(status_code=503, detail="Billing cog is not loaded")
+    try:
+        return await cog.process_stripe_webhook_payload(
+            await request.body(),
+            request.headers.get("Stripe-Signature"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/meta")

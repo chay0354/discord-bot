@@ -103,7 +103,7 @@ class StripeSettings:
 
 
 STRIPE_WEBHOOK_HOST = os.getenv("STRIPE_WEBHOOK_HOST", "0.0.0.0")
-STRIPE_WEBHOOK_PORT = int(os.getenv("STRIPE_WEBHOOK_PORT", "8080"))
+STRIPE_WEBHOOK_PORT = int(os.getenv("STRIPE_WEBHOOK_PORT", "8081"))
 
 
 DB_PATH = os.getenv("STOCK_BOT_DB", "stock_bot.sqlite3")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -63,11 +64,23 @@ class BillingCog(commands.Cog):
         self._runner: web.AppRunner | None = None
 
     async def cog_load(self) -> None:
+        settings = StripeSettings()
+        api_port = int(os.getenv("PORT", os.getenv("CRM_API_PORT", "8000")))
+        # Railway exposes one port (PORT). CRM API uses it; webhook is on POST /stripe/webhook there.
+        if STRIPE_WEBHOOK_PORT == api_port:
+            print(
+                f"[billing] Stripe webhook on CRM API at POST /stripe/webhook (port {api_port})",
+                flush=True,
+            )
+            return
+        if not settings.webhook_secret:
+            print("[billing] Stripe webhook server disabled (no STRIPE_WEBHOOK_SECRET)", flush=True)
+            return
         self._runner = web.AppRunner(self._app())
         await self._runner.setup()
         site = web.TCPSite(self._runner, STRIPE_WEBHOOK_HOST, STRIPE_WEBHOOK_PORT)
         await site.start()
-        print(f"[billing] Stripe webhook listening on {STRIPE_WEBHOOK_HOST}:{STRIPE_WEBHOOK_PORT}")
+        print(f"[billing] Stripe webhook listening on {STRIPE_WEBHOOK_HOST}:{STRIPE_WEBHOOK_PORT}", flush=True)
 
     async def cog_unload(self) -> None:
         if self._runner:
@@ -170,13 +183,16 @@ class BillingCog(commands.Cog):
                 )
         return discord_id
 
-    async def _handle_webhook(self, request: web.Request) -> web.Response:
+    async def process_stripe_webhook_payload(
+        self,
+        payload: bytes,
+        stripe_signature: str | None = None,
+    ) -> dict[str, bool]:
         settings = StripeSettings()
-        payload = await request.read()
         if settings.webhook_secret:
-            signature = request.headers.get("Stripe-Signature", "")
+            signature = stripe_signature or ""
             if not verify_webhook_signature(payload, signature, settings.webhook_secret):
-                return web.Response(status=400, text="invalid signature")
+                raise ValueError("invalid signature")
         event = json.loads(payload.decode("utf-8"))
         event_type = event.get("type", "")
         obj = (event.get("data") or {}).get("object") or {}
@@ -189,7 +205,17 @@ class BillingCog(commands.Cog):
             "invoice.payment_failed",
         }:
             await self._sync_subscription(obj, event_type)
-        return web.json_response({"received": True})
+        return {"received": True}
+
+    async def _handle_webhook(self, request: web.Request) -> web.Response:
+        try:
+            result = await self.process_stripe_webhook_payload(
+                await request.read(),
+                request.headers.get("Stripe-Signature"),
+            )
+        except ValueError as exc:
+            return web.Response(status=400, text=str(exc))
+        return web.json_response(result)
 
     @commands.command(name="subscribe")
     @commands.guild_only()
