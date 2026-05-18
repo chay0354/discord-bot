@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -9,7 +10,6 @@ import app_state
 import database
 from config import CATEGORY_TITLES, CATEGORIES, TICKER_LIMIT_PER_CATEGORY
 from cogs.scheduler import SchedulerCog
-from services.category_reconcile import reconcile_ticker_categories
 from services.finnhub_client import format_quote, quote_and_names_for_symbols
 
 
@@ -48,44 +48,58 @@ async def _scheduler() -> SchedulerCog:
     return cog
 
 
-async def run_action(action: str, *, actor_id: int | None = None) -> dict[str, Any]:
-    guild = _guild()
+async def run_action(
+    action: str,
+    *,
+    actor_id: int | None = None,
+    guild: discord.Guild | None = None,
+) -> dict[str, Any]:
+    target = guild if guild is not None else _guild()
     scheduler = await _scheduler()
     week_key = database.week_key_for()
 
-    if action == "start_voting":
-        updated, counts = await scheduler._monday_open_one_guild(guild)
-        database.log_event(guild.id, "crm_start_voting", {"updated": updated, "counts": counts})
-        return {"ok": True, "message": "Vote stage started", "updated": updated, "counts": counts}
-
-    if action == "close_early":
-        await scheduler._tuesday_early_close_one_guild(guild)
-        database.log_event(guild.id, "crm_close_early", {})
-        return {"ok": True, "message": "Early window closed"}
-
-    if action == "end_competition":
-        await scheduler._friday_close_one_guild(guild)
-        database.log_event(guild.id, "crm_end_competition", {})
-        return {"ok": True, "message": "Vote stage ended"}
-
-    if action == "start_pre_voting":
-        await scheduler._restart_pre_voting_one_guild(guild, actor_id=actor_id)
-        database.log_event(guild.id, "crm_start_pre_voting", {"actor_id": actor_id})
-        return {"ok": True, "message": "Pre-voting restarted"}
-
-    if action == "end_pre_start_voting":
-        updated, counts = await scheduler._monday_open_one_guild(guild)
+    if action in ("start_pre_vote", "start_pre_voting"):
+        cycle = database.ensure_cycle(target.id, week_key)
+        status = str(cycle.get("status") or "")
+        if cycle.get("voting_open") or status == "voting":
+            await scheduler._friday_close_one_guild(target)
+        elif status != "closed":
+            await scheduler._friday_close_one_guild(target)
+        await scheduler._restart_pre_voting_one_guild(target, actor_id=actor_id)
+        next_week = database.ticker_selection_week_key_for()
         database.log_event(
-            guild.id,
-            "crm_end_pre_start_voting",
-            {"updated": updated, "counts": counts},
+            target.id,
+            "start_pre_vote",
+            {"ended_week": week_key, "pre_vote_week": next_week, "actor_id": actor_id},
         )
         return {
             "ok": True,
-            "message": "Pre-voting ended and vote stage started",
+            "message": f"Week {week_key} ended. Pre-vote opened for {next_week}.",
+        }
+
+    if action in ("start_vote", "start_voting", "end_pre_start_voting"):
+        updated, counts = await scheduler._monday_open_one_guild(target)
+        database.log_event(
+            target.id,
+            "start_vote",
+            {"updated": updated, "counts": counts, "actor_id": actor_id},
+        )
+        return {
+            "ok": True,
+            "message": "Vote stage started.",
             "updated": updated,
             "counts": counts,
         }
+
+    if action == "close_early":
+        await scheduler._tuesday_early_close_one_guild(target)
+        database.log_event(target.id, "close_early", {"actor_id": actor_id})
+        return {"ok": True, "message": "Early window closed."}
+
+    if action == "end_competition":
+        await scheduler._friday_close_one_guild(target)
+        database.log_event(target.id, "end_competition", {"actor_id": actor_id})
+        return {"ok": True, "message": "Vote stage ended."}
 
     raise ValueError(f"Unknown action: {action}")
 
@@ -116,7 +130,6 @@ def get_game_status() -> dict[str, Any]:
 def get_tickers() -> dict[str, Any]:
     gid = _guild_id()
     week_key = database.week_key_for()
-    reconcile_ticker_categories(gid, week_key)
     rows = database.list_ticker_pick_rows(gid, week_key)
     return {"week_key": week_key, "picks": rows, "by_category": database.list_tickers(gid, week_key)}
 
@@ -136,7 +149,6 @@ def get_votes() -> dict[str, Any]:
 def get_leaderboards() -> dict[str, Any]:
     gid = _guild_id()
     week_key = database.week_key_for()
-    reconcile_ticker_categories(gid, week_key)
     out: dict[str, list[dict[str, Any]]] = {}
     all_syms: list[str] = []
     for cat in CATEGORIES:
@@ -156,6 +168,149 @@ def get_leaderboards() -> dict[str, Any]:
             )
         out[cat] = rows
     return {"week_key": week_key, "leaderboards": out, "category_titles": CATEGORY_TITLES}
+
+
+def _parse_audit_details(details: Any) -> dict[str, Any]:
+    if details is None:
+        return {}
+    if isinstance(details, str):
+        try:
+            parsed = json.loads(details)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return dict(details) if isinstance(details, dict) else {}
+
+
+def _backfill_completed_games_from_audit(guild_id: int) -> None:
+    """One-time style recovery when votes were cleared but friday_close audit rows exist."""
+    existing = {r["week_key"] for r in database.list_completed_games(guild_id, limit=50)}
+    logs = database._select(
+        "audit_logs",
+        f"?select=created_at,details&guild_id=eq.{guild_id}&event_type=eq.friday_close"
+        f"&order=created_at.desc&limit=50",
+    )
+    for log in logs:
+        details = _parse_audit_details(log.get("details"))
+        wk = str(details.get("week_key") or "").strip()
+        if not wk or wk in existing:
+            continue
+        raw_winners = details.get("winners") or []
+        winner_ids = [int(x) for x in raw_winners] if isinstance(raw_winners, list) else []
+        stocks = database.winning_stocks_for_week(guild_id, wk)
+        totals = database.vote_totals_for_week(guild_id, wk)
+        has_votes = any(totals.get(cat) for cat in CATEGORIES)
+        database._request(
+            "POST",
+            "completed_games",
+            query="?on_conflict=guild_id,week_key",
+            json_body={
+                "guild_id": guild_id,
+                "week_key": wk,
+                "closed_at": log.get("created_at") or database.utc_now_iso(),
+                "winner_ids": winner_ids,
+                "winning_stocks": stocks if has_votes else {},
+                "vote_totals": totals if has_votes else {},
+                "winners": database.winners_payload(winner_ids),
+            },
+            headers={"Prefer": "resolution=merge-duplicates"},
+        )
+        existing.add(wk)
+
+    for row in database._select(
+        "winners",
+        f"?select=week_key,user_id,awarded_at&guild_id=eq.{guild_id}&order=awarded_at.desc&limit=200",
+    ):
+        wk = str(row["week_key"])
+        if wk in existing:
+            continue
+        uid = int(row["user_id"])
+        peers = database._select(
+            "winners",
+            f"?select=user_id&guild_id=eq.{guild_id}&week_key=eq.{database._eq(wk)}",
+        )
+        winner_ids = sorted({int(p["user_id"]) for p in peers})
+        database.save_completed_game(
+            guild_id,
+            wk,
+            winner_ids=winner_ids,
+            closed_at=str(row.get("awarded_at") or database.utc_now_iso()),
+        )
+        existing.add(wk)
+
+
+def _enrich_winners_from_discord(guild_id: int, winners: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    bot = app_state.bot
+    if not bot or not app_state.bot_ready:
+        return winners
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return winners
+    out: list[dict[str, Any]] = []
+    for row in winners:
+        uid = int(row.get("user_id", 0))
+        name = str(row.get("username") or "").strip()
+        if name.startswith("Player ") or not name:
+            member = guild.get_member(uid)
+            if member:
+                name = str(member.display_name or member.name)
+                database.upsert_user(uid, name)
+        out.append({"user_id": uid, "username": name or f"Player {uid}"})
+    return out
+
+
+def get_game_history(limit: int = 20) -> list[dict[str, Any]]:
+    gid = _guild_id()
+    cap = min(max(limit, 1), 50)
+    rows = database.list_completed_games(gid, limit=cap)
+    if not rows:
+        _backfill_completed_games_from_audit(gid)
+        rows = database.list_completed_games(gid, limit=cap)
+
+    games: list[dict[str, Any]] = []
+    for row in rows:
+        raw_ids = row.get("winner_ids") or []
+        winner_ids = sorted(int(x) for x in raw_ids) if isinstance(raw_ids, list) else []
+        stocks = row.get("winning_stocks") or {}
+        if not isinstance(stocks, dict):
+            stocks = {}
+        vote_totals = row.get("vote_totals") or {}
+        if not isinstance(vote_totals, dict):
+            vote_totals = {}
+        winners = row.get("winners") or []
+        if not isinstance(winners, list):
+            winners = []
+        wk = str(row["week_key"])
+        if not any(vote_totals.get(cat) for cat in CATEGORIES):
+            live_totals = database.vote_totals_for_week(gid, wk)
+            if any(live_totals.get(cat) for cat in CATEGORIES):
+                vote_totals = live_totals
+        if not any(stocks.get(cat) for cat in CATEGORIES):
+            live = database.winning_stocks_for_week(gid, wk)
+            if any(live.get(cat) for cat in CATEGORIES):
+                stocks = live
+        if not winners and winner_ids:
+            winners = database.winners_payload(winner_ids)
+        elif winners and winner_ids:
+            known = {int(w.get("user_id", 0)) for w in winners if isinstance(w, dict)}
+            missing = [uid for uid in winner_ids if uid not in known]
+            if missing:
+                names = database.usernames_for_discord_ids(missing)
+                for uid in missing:
+                    winners.append({"user_id": uid, "username": names.get(uid) or f"Player {uid}"})
+        winners = _enrich_winners_from_discord(gid, winners)
+        games.append(
+            {
+                "week_key": wk,
+                "closed_at": row.get("closed_at"),
+                "winner_ids": winner_ids,
+                "winners": winners,
+                "category_titles": CATEGORY_TITLES,
+                "winning_stocks": stocks,
+                "vote_totals": vote_totals,
+            }
+        )
+    return games
 
 
 def get_audit_logs(limit: int = 50) -> list[dict[str, Any]]:

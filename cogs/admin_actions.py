@@ -3,8 +3,6 @@ from __future__ import annotations
 import discord
 from discord.ext import commands
 
-import database
-from cogs.scheduler import SchedulerCog
 from config import (
     CHANNEL_ADMIN_ACTIONS,
     CHANNEL_BLUE_TICKER,
@@ -15,6 +13,7 @@ from config import (
     CHANNEL_SMALL_VOTE,
     ROLE_ADMIN,
 )
+from game_control import run_action
 
 
 def _is_admin(member: discord.Member) -> bool:
@@ -26,14 +25,6 @@ class AdminActionsView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
 
-    async def _scheduler(self) -> SchedulerCog:
-        cog = self.bot.get_cog("SchedulerCog")
-        if isinstance(cog, SchedulerCog):
-            return cog
-        scheduler = SchedulerCog(self.bot)
-        await self.bot.add_cog(scheduler)
-        return scheduler
-
     async def _guard(self, interaction: discord.Interaction) -> bool:
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("This only works inside the server.", ephemeral=True)
@@ -44,99 +35,50 @@ class AdminActionsView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         return True
 
-    @discord.ui.button(
-        label="Start Vote Stage",
-        style=discord.ButtonStyle.success,
-        custom_id="admin_actions:start_voting",
-    )
-    async def start_voting(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    async def _run(self, interaction: discord.Interaction, action: str) -> None:
         if not await self._guard(interaction):
             return
-        scheduler = await self._scheduler()
-        updated, counts = await scheduler._monday_open_one_guild(interaction.guild)
-        await interaction.followup.send(
-            f"Vote Stage started. Users now vote from the selected stocks. Updated {updated} channel(s). Counts: {counts}",
-            ephemeral=True,
-        )
+        try:
+            result = await run_action(
+                action,
+                actor_id=interaction.user.id,
+                guild=interaction.guild,
+            )
+            msg = str(result.get("message") or "Done.")
+            counts = result.get("counts")
+            if counts is not None:
+                msg += f" Updated {result.get('updated', 0)} channel(s). Counts: {counts}"
+            await interaction.followup.send(msg, ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"Action failed: {exc}", ephemeral=True)
 
     @discord.ui.button(
-        label="Close Early Window",
-        style=discord.ButtonStyle.secondary,
-        custom_id="admin_actions:close_early",
-    )
-    async def close_early(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if not await self._guard(interaction):
-            return
-        scheduler = await self._scheduler()
-        await scheduler._tuesday_early_close_one_guild(interaction.guild)
-        await interaction.followup.send("Early winner window closed manually.", ephemeral=True)
-
-    @discord.ui.button(
-        label="End Vote Stage",
-        style=discord.ButtonStyle.danger,
-        custom_id="admin_actions:end_competition",
-    )
-    async def end_competition(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if not await self._guard(interaction):
-            return
-        scheduler = await self._scheduler()
-        await scheduler._friday_close_one_guild(interaction.guild)
-        await interaction.followup.send("Vote Stage ended. Results/winners were processed.", ephemeral=True)
-
-    @discord.ui.button(
-        label="Start Pre-Voting Stage",
+        label="Start pre-vote",
         style=discord.ButtonStyle.primary,
-        custom_id="admin_actions:start_ticker_selection",
-        row=1,
+        custom_id="admin_actions:start_pre_vote",
     )
-    async def start_ticker_selection(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if not await self._guard(interaction):
-            return
-        scheduler = await self._scheduler()
-        await scheduler._restart_pre_voting_one_guild(interaction.guild, actor_id=interaction.user.id)
-        await interaction.followup.send(
-            "Pre-Voting Stage restarted. Any current game state was stopped and users can choose the 20 stocks again.",
-            ephemeral=True,
-        )
+    async def start_pre_vote(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._run(interaction, "start_pre_vote")
 
     @discord.ui.button(
-        label="End Pre-Voting + Start Vote Stage",
+        label="Start vote",
         style=discord.ButtonStyle.success,
-        custom_id="admin_actions:end_selection_start_voting",
-        row=1,
+        custom_id="admin_actions:start_vote",
     )
-    async def end_selection_start_voting(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if not await self._guard(interaction):
-            return
-        scheduler = await self._scheduler()
-        updated, counts = await scheduler._monday_open_one_guild(interaction.guild)
-        database.log_event(
-            interaction.guild.id,
-            "manual_end_selection_start_voting",
-            {"actor_id": interaction.user.id, "updated": updated, "counts": counts},
-        )
-        await interaction.followup.send(
-            f"Pre-Voting ended and Vote Stage started. Updated {updated} channel(s). Counts: {counts}",
-            ephemeral=True,
-        )
+    async def start_vote(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._run(interaction, "start_vote")
 
 
 def admin_actions_embed() -> discord.Embed:
     return discord.Embed(
         title="Admin Actions",
         description=(
-            "**Pre-Voting Stage**\n"
-            "Subscribed users choose the 20 stocks that will be in the next game for each category.\n"
+            "**Pre-vote** — subscribers pick the 20 stocks per category for the next game.\n"
             f"Channels: `#{CHANNEL_SMALL_TICKER}`, `#{CHANNEL_MID_TICKER}`, `#{CHANNEL_BLUE_TICKER}`\n\n"
-            "**Vote Stage**\n"
-            "The game itself. Users vote only from the 20 selected stocks in each category.\n"
+            "**Vote** — members vote on the ballot stocks only.\n"
             f"Channels: `#{CHANNEL_SMALL_VOTE}`, `#{CHANNEL_MID_VOTE}`, `#{CHANNEL_BLUE_VOTE}`\n\n"
-            "**Buttons**\n"
-            "- **Start Pre-Voting Stage**: opens the subscriber stock-selection channels.\n"
-            "- **End Pre-Voting + Start Vote Stage**: closes selection and starts the game voting.\n"
-            "- **Start Vote Stage**: starts/reposts voting from the selected stocks.\n"
-            "- **Close Early Window**: stops new early-vote eligibility.\n"
-            "- **End Vote Stage**: closes voting, posts final results, processes winners, then opens Pre-Voting again."
+            "**Start pre-vote** — ends the current week (results saved), then opens ticker picks for the next week.\n"
+            "**Start vote** — closes pre-vote and opens the live vote stage."
         ),
         color=discord.Color.blurple(),
     )

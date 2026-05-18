@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from api.auth import require_admin_key
 from game_control import (
     get_audit_logs,
+    get_game_history,
     get_game_status,
     get_leaderboards,
     get_subscriptions,
@@ -90,6 +91,14 @@ def game_votes(_: None = Depends(require_admin_key)) -> dict[str, Any]:
 def game_leaderboards(_: None = Depends(require_admin_key)) -> dict[str, Any]:
     try:
         return get_leaderboards()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/game/history")
+def game_history(limit: int = 20, _: None = Depends(require_admin_key)) -> list[dict[str, Any]]:
+    try:
+        return get_game_history(limit=min(limit, 50))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

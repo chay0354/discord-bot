@@ -257,8 +257,9 @@ class SchedulerCog(commands.Cog):
             early_window_end_at=end_utc.isoformat() if end_utc else None,
         )
 
-        # 2) Read current ticker selections from Supabase, with #pic-results as fallback.
-        await asyncio.to_thread(reconcile_ticker_categories, guild.id, week_key)
+        # 2) Read ballot from Supabase (#pic-results fallback). Do not reconcile here —
+        # the ballot should stay 20 per category as picked. Live cap changes run during
+        # voting via WeeklyPicksCog._category_reconcile_loop (every 5 min).
         stored = database.list_tickers(guild.id, week_key)
         lists: List[List[str]] = [stored["small"], stored["mid"], stored["blue"]]
         pr_msg = None
@@ -426,6 +427,10 @@ class SchedulerCog(commands.Cog):
         now_utc = _now_utc()
         week_key = database.ticker_selection_week_key_for(now_utc)
         database.ensure_cycle(guild.id, week_key)
+        cycle = database.ensure_cycle(guild.id, week_key)
+        if str(cycle.get("status") or "") == "closed":
+            week_key = database.next_week_key_for(now_utc)
+            database.ensure_cycle(guild.id, week_key)
         database.reset_week_game_data(guild.id, week_key)
         reset_picker_runtime_state()
         database.set_cycle_phase(
@@ -593,6 +598,12 @@ class SchedulerCog(commands.Cog):
         await self._expire_winners(guild)
 
         winners = database.eligible_winners(guild.id, week_key)
+        database.save_completed_game(
+            guild.id,
+            week_key,
+            winner_ids=winners,
+            closed_at=now_utc.isoformat(),
+        )
         winner_role = discord.utils.get(guild.roles, name=ROLE_WINNER)
         expires_at_utc = now_utc + timedelta(days=7)
         expires_at = expires_at_utc.isoformat()
@@ -600,6 +611,8 @@ class SchedulerCog(commands.Cog):
             for user_id in winners:
                 database.add_winner(guild.id, week_key, user_id, expires_at)
                 member = guild.get_member(user_id)
+                if member:
+                    database.upsert_user(user_id, str(member.display_name or member.name))
                 if member:
                     try:
                         await member.add_roles(winner_role, reason="Weekly stock game winner")

@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 from dotenv import load_dotenv
 
 load_dotenv(ROOT / ".env")
+load_dotenv(ROOT.parent / ".env")
 
 import discord
 from discord.ext import commands
@@ -21,76 +22,8 @@ from discord.ext import commands
 import database
 from cogs.scheduler import SchedulerCog
 from cogs.weekly_picks import WeeklyPicksCog
-
-
-MANUAL_TICKERS: dict[str, list[tuple[str, int, str]]] = {
-    "small": [
-        ("PRTS", 450_000_000, "NASDAQ"),
-        ("BLNK", 250_000_000, "NASDAQ"),
-        ("RZLV", 300_000_000, "NASDAQ"),
-        ("SSTI", 500_000_000, "NASDAQ"),
-        ("SPCB", 40_000_000, "NASDAQ"),
-        ("KULR", 90_000_000, "NYSE"),
-        ("GPRO", 280_000_000, "NASDAQ"),
-        ("BB", 1_900_000_000, "NYSE"),
-        ("VUZI", 80_000_000, "NASDAQ"),
-        ("MVIS", 220_000_000, "NASDAQ"),
-        ("DDD", 400_000_000, "NYSE"),
-        ("VLD", 120_000_000, "NYSE"),
-        ("NNDM", 380_000_000, "NASDAQ"),
-        ("WULF", 1_800_000_000, "NASDAQ"),
-        ("HUT", 1_600_000_000, "NASDAQ"),
-        ("BTBT", 500_000_000, "NASDAQ"),
-        ("BITF", 1_000_000_000, "NASDAQ"),
-        ("SDIG", 70_000_000, "NASDAQ"),
-        ("CAN", 400_000_000, "NASDAQ"),
-        ("HIVE", 500_000_000, "NASDAQ"),
-    ],
-    "mid": [
-        ("CROX", 6_000_000_000, "NASDAQ"),
-        ("ETSY", 7_000_000_000, "NASDAQ"),
-        ("FIVE", 5_000_000_000, "NASDAQ"),
-        ("WING", 10_000_000_000, "NASDAQ"),
-        ("SHAK", 4_000_000_000, "NYSE"),
-        ("CHWY", 12_000_000_000, "NYSE"),
-        ("BROS", 5_000_000_000, "NYSE"),
-        ("OLLI", 7_000_000_000, "NASDAQ"),
-        ("WEN", 4_000_000_000, "NASDAQ"),
-        ("DIN", 1_000_000_000, "NYSE"),
-        ("TXRH", 12_000_000_000, "NASDAQ"),
-        ("CAKE", 2_000_000_000, "NASDAQ"),
-        ("PLAY", 1_500_000_000, "NASDAQ"),
-        ("DRI", 23_000_000_000, "NYSE"),
-        ("YETI", 3_500_000_000, "NYSE"),
-        ("COLM", 5_000_000_000, "NASDAQ"),
-        ("DECK", 25_000_000_000, "NYSE"),
-        ("SKX", 10_000_000_000, "NYSE"),
-        ("BOOT", 4_000_000_000, "NYSE"),
-        ("SIG", 4_000_000_000, "NYSE"),
-    ],
-    "blue": [
-        ("AAPL", 3_000_000_000_000, "NASDAQ"),
-        ("MSFT", 3_000_000_000_000, "NASDAQ"),
-        ("NVDA", 3_000_000_000_000, "NASDAQ"),
-        ("GOOGL", 2_000_000_000_000, "NASDAQ"),
-        ("AMZN", 2_000_000_000_000, "NASDAQ"),
-        ("META", 1_000_000_000_000, "NASDAQ"),
-        ("TSLA", 800_000_000_000, "NASDAQ"),
-        ("AVGO", 1_000_000_000_000, "NASDAQ"),
-        ("JPM", 600_000_000_000, "NYSE"),
-        ("V", 600_000_000_000, "NYSE"),
-        ("LLY", 800_000_000_000, "NYSE"),
-        ("UNH", 500_000_000_000, "NYSE"),
-        ("MA", 450_000_000_000, "NYSE"),
-        ("XOM", 500_000_000_000, "NYSE"),
-        ("COST", 400_000_000_000, "NASDAQ"),
-        ("WMT", 700_000_000_000, "NYSE"),
-        ("PG", 400_000_000_000, "NYSE"),
-        ("HD", 350_000_000_000, "NYSE"),
-        ("ORCL", 400_000_000_000, "NYSE"),
-        ("JNJ", 350_000_000_000, "NYSE"),
-    ],
-}
+from config import TICKER_LIMIT_PER_CATEGORY
+from services.ticker_seed import manual_ballot_tickers
 
 
 class ManualVotingBot(commands.Bot):
@@ -143,12 +76,15 @@ class ManualVotingBot(commands.Bot):
             )
             print("Cleared existing picks/votes and opened temporary seed phase.", flush=True)
 
+            print("Validating 20 tickers per category via Finnhub…", flush=True)
+            manual_tickers = manual_ballot_tickers()
+
             # Stay within PostgreSQL bigint range while keeping seeded users distinct.
             submitter_id = int(self.user.id)
             users: list[dict[str, object]] = []
             picks: list[dict[str, object]] = []
             seeded: dict[str, int] = {}
-            for category, tickers in MANUAL_TICKERS.items():
+            for category, tickers in manual_tickers.items():
                 seeded[category] = len(tickers)
                 for ticker, market_cap, exchange in tickers:
                     submitter_id += 1
@@ -187,6 +123,9 @@ class ManualVotingBot(commands.Bot):
                 headers={"Prefer": "return=minimal"},
             )
             print(f"Seeded ticker rows: {seeded}", flush=True)
+            for cat, n in seeded.items():
+                if n != TICKER_LIMIT_PER_CATEGORY:
+                    print(f"WARNING: {cat} has {n} tickers, expected {TICKER_LIMIT_PER_CATEGORY}", flush=True)
 
             updated, counts = await scheduler._monday_open_one_guild(guild)
             database.log_event(

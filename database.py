@@ -81,6 +81,7 @@ def init_db() -> None:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         raise SupabaseError("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY before starting the bot")
     _request("GET", "game_cycles", query="?select=id&limit=1")
+    _request("GET", "completed_games", query="?select=id&limit=1")
 
 
 def reset_week_game_data(guild_id: int, week_key: str) -> None:
@@ -88,6 +89,97 @@ def reset_week_game_data(guild_id: int, week_key: str) -> None:
     query = f"?guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
     _request("DELETE", "votes", query=query)
     _request("DELETE", "ticker_picks", query=query)
+
+
+def winning_stocks_for_week(guild_id: int, week_key: str) -> dict[str, list[dict[str, Any]]]:
+    """Top-voted ticker(s) per category for a completed week."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for cat in CATEGORIES:
+        counts = vote_counts(guild_id, week_key, cat)
+        if not counts:
+            out[cat] = []
+            continue
+        top_votes = counts[0][1]
+        winners_at_top = [(ticker, total) for ticker, total in counts if total == top_votes]
+        tied = len(winners_at_top) > 1
+        out[cat] = [
+            {"ticker": ticker, "votes": total, "tied": tied}
+            for ticker, total in winners_at_top
+        ]
+    return out
+
+
+def vote_totals_for_week(guild_id: int, week_key: str) -> dict[str, list[dict[str, Any]]]:
+    """All tickers and vote counts per category (sorted high → low)."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for cat in CATEGORIES:
+        out[cat] = [
+            {"ticker": ticker, "votes": total}
+            for ticker, total in vote_counts(guild_id, week_key, cat)
+        ]
+    return out
+
+
+def usernames_for_discord_ids(discord_ids: list[int]) -> dict[int, str]:
+    if not discord_ids:
+        return {}
+    ids_csv = ",".join(str(int(i)) for i in discord_ids)
+    rows = _select("users", f"?select=discord_id,username&discord_id=in.({ids_csv})")
+    out: dict[int, str] = {}
+    for row in rows:
+        uid = int(row["discord_id"])
+        name = str(row.get("username") or "").strip()
+        if name:
+            out[uid] = name
+    return out
+
+
+def winners_payload(winner_ids: list[int]) -> list[dict[str, Any]]:
+    names = usernames_for_discord_ids(winner_ids)
+    return [
+        {
+            "user_id": uid,
+            "username": names.get(uid) or f"User {uid}",
+        }
+        for uid in winner_ids
+    ]
+
+
+def save_completed_game(
+    guild_id: int,
+    week_key: str,
+    *,
+    winner_ids: list[int],
+    closed_at: str | None = None,
+) -> dict[str, Any]:
+    """Persist a finished week snapshot for the CRM history panel."""
+    stocks = winning_stocks_for_week(guild_id, week_key)
+    payload = {
+        "guild_id": guild_id,
+        "week_key": week_key,
+        "closed_at": closed_at or utc_now_iso(),
+        "winner_ids": winner_ids,
+        "winning_stocks": stocks,
+        "vote_totals": vote_totals_for_week(guild_id, week_key),
+        "winners": winners_payload(winner_ids),
+    }
+    rows = _request(
+        "POST",
+        "completed_games",
+        query="?on_conflict=guild_id,week_key",
+        json_body=payload,
+        headers={"Prefer": "resolution=merge-duplicates,return=representation"},
+    ) or []
+    return rows[0] if rows else payload
+
+
+def list_completed_games(guild_id: int, limit: int = 20) -> list[dict[str, Any]]:
+    cap = min(max(limit, 1), 50)
+    return _select(
+        "completed_games",
+        f"?select=week_key,closed_at,winner_ids,winning_stocks,vote_totals,winners"
+        f"&guild_id=eq.{guild_id}&order=closed_at.desc&limit={cap}",
+    )
 
 
 def week_key_for(dt: datetime | None = None) -> str:
