@@ -36,16 +36,30 @@ def _guild() -> discord.Guild:
     return guild
 
 
+def _find_scheduler_cog(bot: discord.Client) -> SchedulerCog | None:
+    """Return the loaded scheduler cog without isinstance (avoids duplicate-class imports)."""
+    cog = bot.get_cog("SchedulerCog")
+    if cog is not None:
+        return cog  # type: ignore[return-value]
+    for loaded in bot.cogs.values():
+        if type(loaded).__name__ == "SchedulerCog":
+            return loaded  # type: ignore[return-value]
+    return None
+
+
 async def _scheduler() -> SchedulerCog:
     bot = app_state.bot
     if not bot:
         raise RuntimeError("Discord bot is not connected")
-    cog = bot.get_cog("SchedulerCog")
-    if isinstance(cog, SchedulerCog):
+    if not app_state.bot_ready:
+        raise RuntimeError("Discord bot is still starting; try again in a few seconds.")
+    cog = _find_scheduler_cog(bot)
+    if cog is not None:
         return cog
-    cog = SchedulerCog(bot)
-    await bot.add_cog(cog)
-    return cog
+    raise RuntimeError(
+        "SchedulerCog is not loaded. Check deploy logs for "
+        "'[bot] Failed cogs.scheduler' and redeploy the bot."
+    )
 
 
 async def run_action(
