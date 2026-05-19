@@ -206,6 +206,20 @@ def _timer_lines(end_utc: datetime) -> str:
     return f"**Early Winners Window ends:** {_format_et(end_utc)} — <t:{unix}:F> • <t:{unix}:R>"
 
 
+def _winner_role_dm(valid_until_utc: datetime) -> str:
+    et = _format_et(valid_until_utc)
+    return (
+        "You won this week's stock game and received the **WINNER** role for one week.\n\n"
+        "**What WINNER gives you until then:**\n"
+        "• **5 votes** per category each week (same as PLAYER)\n"
+        "• Access to **ticker pick** channels during pre-vote\n"
+        "• Access to **live leaderboard** channels during voting\n"
+        "• Your votes count toward the weekly game like a subscriber\n\n"
+        f"**Valid until:** {et}\n"
+        "The role is removed automatically when that week ends."
+    )
+
+
 class SchedulerCog(commands.Cog):
     """Automations for Monday 09:00 ET. Also exposes manual admin triggers."""
 
@@ -533,8 +547,10 @@ class SchedulerCog(commands.Cog):
                 description=(
                     f"Week: **{week_key}**\n"
                     f"Winner(s):\n{mentions}\n\n"
-                    f"Role: **{ROLE_WINNER}**\n"
-                    f"Valid until: **{_format_et(valid_until_utc)}**"
+                    f"Role: **{ROLE_WINNER}** (one week)\n"
+                    f"Valid until: **{_format_et(valid_until_utc)}**\n\n"
+                    "**WINNER perks:** 5 votes per category, ticker-pick channels, live leaderboards "
+                    "(same access as PLAYER for that week)."
                 ),
                 color=discord.Color.gold(),
             )
@@ -616,7 +632,7 @@ class SchedulerCog(commands.Cog):
                 if member:
                     try:
                         await member.add_roles(winner_role, reason="Weekly stock game winner")
-                        await member.send("You won this week's stock game and received the WINNER role for one week.")
+                        await member.send(_winner_role_dm(expires_at_utc))
                     except Exception:
                         pass
         await self._publish_last_game_winners(
