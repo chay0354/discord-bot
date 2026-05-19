@@ -13,6 +13,8 @@ from discord.ext import commands
 import database
 from config import (
     CHANNEL_MOD,
+    CHANNEL_PLAYER,
+    PLAYER_CHANNEL_CANDIDATES,
     ROLE_PLAYER,
     STRIPE_WEBHOOK_HOST,
     STRIPE_WEBHOOK_PORT,
@@ -32,6 +34,147 @@ def _find_text_channel(guild: discord.Guild, name: str) -> discord.TextChannel |
         if ch.name.lower() == name.lower():
             return ch
     return None
+
+
+def find_player_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    for name in PLAYER_CHANNEL_CANDIDATES:
+        ch = _find_text_channel(guild, name)
+        if ch:
+            return ch
+    return _find_text_channel(guild, CHANNEL_PLAYER)
+
+
+def _stripe_link_view(url: str, *, label: str) -> discord.ui.View:
+    """Discord link button opens the URL in the browser (Stripe checkout / portal)."""
+    view = discord.ui.View(timeout=600)
+    view.add_item(discord.ui.Button(label=label, style=discord.ButtonStyle.link, url=url))
+    return view
+
+
+def player_subscribe_embed() -> discord.Embed:
+    return discord.Embed(
+        title="PLAYER membership",
+        description=(
+            "Subscribe to unlock **PLAYER** benefits:\n"
+            "• **5 votes** per category each week (vs 1 as NPC)\n"
+            "• Access to **live leaderboard** channels\n"
+            "• Ticker pick channels during pre-vote\n\n"
+            "Click **Subscribe**, then **Pay on Stripe** to open the payment page."
+        ),
+        color=discord.Color.green(),
+    )
+
+
+class PlayerSubscribeView(discord.ui.View):
+    def __init__(self, bot: commands.Bot):
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(
+        label="Subscribe",
+        style=discord.ButtonStyle.success,
+        custom_id="billing:subscribe",
+    )
+    async def subscribe_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        try:
+            if not interaction.guild or not isinstance(interaction.user, discord.Member):
+                await interaction.response.send_message("Use this in the server.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+            url = await asyncio.to_thread(
+                create_checkout_session,
+                interaction.user.id,
+                str(interaction.user),
+            )
+            database.upsert_user(interaction.user.id, username=str(interaction.user))
+            await interaction.followup.send(
+                "Tap **Pay on Stripe** below to open the secure checkout page.",
+                view=_stripe_link_view(url, label="Pay on Stripe"),
+                ephemeral=True,
+            )
+        except StripeClientError as exc:
+            await self._interaction_error(interaction, f"Payments are not available right now: {exc}")
+        except Exception as exc:
+            await self._interaction_error(interaction, f"Subscribe failed: {exc}")
+
+    @staticmethod
+    async def _interaction_error(interaction: discord.Interaction, message: str) -> None:
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except Exception:
+            pass
+
+    @discord.ui.button(
+        label="Manage subscription",
+        style=discord.ButtonStyle.secondary,
+        custom_id="billing:manage",
+    )
+    async def manage_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        try:
+            if not interaction.guild:
+                await interaction.response.send_message("Use this in the server.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+            subscription = database.get_subscription(interaction.user.id)
+            customer_id = subscription.get("stripe_customer_id") if subscription else None
+            if not customer_id:
+                await interaction.followup.send(
+                    "No billing account found yet. Use **Subscribe** first.",
+                    ephemeral=True,
+                )
+                return
+            url = await asyncio.to_thread(create_billing_portal_session, customer_id)
+            await interaction.followup.send(
+                "Tap **Manage billing** to open the Stripe customer portal.",
+                view=_stripe_link_view(url, label="Manage billing"),
+                ephemeral=True,
+            )
+        except StripeClientError as exc:
+            await PlayerSubscribeView._interaction_error(
+                interaction, f"Billing portal unavailable: {exc}"
+            )
+        except Exception as exc:
+            await PlayerSubscribeView._interaction_error(interaction, f"Manage failed: {exc}")
+
+
+async def refresh_player_subscribe_panel(guild: discord.Guild, bot: commands.Bot) -> discord.TextChannel | None:
+    settings = StripeSettings()
+    if not settings.secret_key or not settings.price_id:
+        print("[billing] Skipping PLAYER panel (STRIPE_SECRET_KEY or STRIPE_MONTHLY_PRICE_ID missing)", flush=True)
+        return None
+
+    channel = find_player_channel(guild)
+    if not channel:
+        print(
+            f"[billing] No player channel in guild {guild.id} (see PLAYER_CHANNEL_CANDIDATES)",
+            flush=True,
+        )
+        return None
+
+    me = guild.me or (guild.get_member(bot.user.id) if bot.user else None)
+    if not me:
+        return channel
+
+    removed = 0
+    async for message in channel.history(limit=100):
+        if message.author.id != me.id:
+            continue
+        try:
+            await message.delete()
+            removed += 1
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    panel = await channel.send(embed=player_subscribe_embed(), view=PlayerSubscribeView(bot))
+    print(
+        f"[billing] Posted subscribe panel in channel_id={channel.id} "
+        f"(deleted {removed} old bot message(s), message_id={panel.id})",
+        flush=True,
+    )
+    return channel
 
 
 def _period_end_from_subscription(subscription: dict[str, Any]) -> str | None:
@@ -62,12 +205,13 @@ class BillingCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._runner: web.AppRunner | None = None
+        self._panels_posted = False
 
     async def cog_load(self) -> None:
+        self.bot.add_view(PlayerSubscribeView(self.bot))
         settings = StripeSettings()
         api_port = int(os.getenv("PORT", os.getenv("CRM_API_PORT", "8000")))
         webhook_port = int(os.getenv("STRIPE_WEBHOOK_PORT", str(STRIPE_WEBHOOK_PORT)))
-        # PaaS (Railway, etc.) exposes one PORT; never bind a second listener on it.
         use_api_webhook = bool(os.getenv("PORT")) or webhook_port == api_port
         if use_api_webhook:
             print(
@@ -92,6 +236,22 @@ class BillingCog(commands.Cog):
         app = web.Application()
         app.router.add_post("/stripe/webhook", self._handle_webhook)
         return app
+
+    async def _refresh_subscribe_panels(self) -> None:
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(2)
+        for guild in self.bot.guilds:
+            try:
+                await refresh_player_subscribe_panel(guild, self.bot)
+            except Exception as exc:
+                print(f"[billing] PLAYER panel refresh failed for {guild.id}: {exc!r}", flush=True)
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        if self._panels_posted:
+            return
+        self._panels_posted = True
+        self.bot.loop.create_task(self._refresh_subscribe_panels())
 
     async def _mod_log(self, guild: discord.Guild | None, title: str, body: str, color: discord.Color) -> None:
         if not guild:
@@ -228,11 +388,33 @@ class BillingCog(commands.Cog):
             await ctx.send(f"Stripe is not configured yet: {exc}")
             return
         database.upsert_user(ctx.author.id, username=str(ctx.author))
+        pay_view = _stripe_link_view(url, label="Pay on Stripe")
         try:
-            await ctx.author.send(f"Subscribe here: {url}")
-            await ctx.reply("I sent you a private subscription link.", mention_author=False)
+            await ctx.author.send(
+                "Open the Stripe payment page:",
+                view=pay_view,
+            )
+            await ctx.reply("I sent you a DM with **Pay on Stripe**.", mention_author=False)
         except Exception:
-            await ctx.reply(f"I could not DM you. Subscribe here: {url}", mention_author=False)
+            await ctx.reply(
+                "I could not DM you. Use the button below:",
+                view=pay_view,
+                mention_author=False,
+            )
+
+    @commands.command(name="post_subscribe_panel")
+    @commands.has_role("ADMIN")
+    @commands.guild_only()
+    async def post_subscribe_panel(self, ctx: commands.Context) -> None:
+        """ADMIN: post Subscribe / Manage buttons in the player channel."""
+        ch = await refresh_player_subscribe_panel(ctx.guild, self.bot)
+        if ch:
+            await ctx.send(f"Subscribe panel posted in {ch.mention}.", delete_after=12)
+        else:
+            await ctx.send(
+                "Could not post panel — check Stripe env vars and that a #player (or subscribe) channel exists.",
+                delete_after=15,
+            )
 
     @commands.command(name="manage_subscription")
     @commands.guild_only()

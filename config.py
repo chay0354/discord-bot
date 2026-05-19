@@ -28,6 +28,16 @@ CHANNEL_BLUE_LIVE = "large-cap-live"
 
 CHANNEL_MOD = "mod"
 CHANNEL_ADMIN_ACTIONS = "admin-actions"
+# Subscribe / PLAYER registration channel (first existing name in guild wins)
+CHANNEL_PLAYER = os.getenv("PLAYER_CHANNEL", "player")
+PLAYER_CHANNEL_CANDIDATES = tuple(
+    n.strip()
+    for n in os.getenv(
+        "PLAYER_CHANNEL_CANDIDATES",
+        "player,subscribe,registration,register,𝐏𝐋𝐀𝐘𝐄𝐑",
+    ).split(",")
+    if n.strip()
+)
 CHANNEL_FINAL_LEADERBOARD = os.getenv(
     "FINAL_LEADERBOARD_CHANNEL",
     "\U0001f947\U0001d40b\U0001d404\U0001d400\U0001d403\U0001d404\U0001d411\U0001d401\U0001d40e\U0001d400\U0001d411\U0001d403\U0001f947",

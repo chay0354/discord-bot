@@ -17,6 +17,7 @@ from config import (
     CHANNEL_BLUE_TICKER,
     CHANNEL_BLUE_VOTE,
     CHANNEL_ADMIN_ACTIONS,
+    CHANNEL_PLAYER,
     CHANNEL_FINAL_LEADERBOARD,
     CHANNEL_MID_LIVE,
     CHANNEL_MID_TICKER,
@@ -180,6 +181,7 @@ class AdminToolsCog(commands.Cog):
             CHANNEL_BLUE_LIVE: subscriber_overwrites(),
             CHANNEL_MOD: mod_overwrites(),
             CHANNEL_ADMIN_ACTIONS: mod_overwrites(),
+            CHANNEL_PLAYER: public_overwrites(),
             CHANNEL_FINAL_LEADERBOARD: public_overwrites(),
             CHANNEL_WINNERS: public_overwrites(),
         }

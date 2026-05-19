@@ -149,7 +149,8 @@ async def refresh_admin_actions_panel(guild: discord.Guild, bot: commands.Bot) -
 
     panel = await channel.send(embed=admin_actions_embed(), view=AdminActionsView(bot))
     print(
-        f"[admin_actions] Posted panel in #{channel.name} (deleted {removed} old bot message(s), id={panel.id})",
+        f"[admin_actions] Posted panel in channel_id={channel.id} "
+        f"(deleted {removed} old bot message(s), message_id={panel.id})",
         flush=True,
     )
     return channel

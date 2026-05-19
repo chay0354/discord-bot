@@ -42,9 +42,7 @@ def create_checkout_session(discord_id: int, username: str) -> str:
             "subscription_data[metadata][discord_id]": str(discord_id),
             "metadata[discord_id]": str(discord_id),
             "metadata[discord_username]": username,
-            "customer_creation": "always",
             "phone_number_collection[enabled]": "true",
-            "consent_collection[promotions]": "auto",
         },
         timeout=15,
     )
