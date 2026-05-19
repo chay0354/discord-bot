@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import discord
 from discord.ext import commands
 
@@ -123,17 +125,33 @@ class AdminActionsView(discord.ui.View):
 
 
 async def refresh_admin_actions_panel(guild: discord.Guild, bot: commands.Bot) -> discord.TextChannel | None:
-    """Replace bot messages in #admin-actions with the current two-button panel."""
+    """Remove old bot panels in #admin-actions and post the current CRM-matched panel."""
     channel = _find_admin_actions_channel(guild)
     if not channel:
+        print(f"[admin_actions] No #{CHANNEL_ADMIN_ACTIONS} in guild {guild.id}", flush=True)
         return None
-    me = guild.me
+    me = guild.me or guild.get_member(bot.user.id) if bot.user else None
     if not me:
-        return channel
-    async for message in channel.history(limit=50):
-        if message.author == me and (message.components or message.embeds):
+        print(f"[admin_actions] Bot member not ready in guild {guild.id}", flush=True)
+        return None
+
+    removed = 0
+    async for message in channel.history(limit=100):
+        if message.author.id != me.id:
+            continue
+        try:
             await message.delete()
-    await channel.send(embed=admin_actions_embed(), view=AdminActionsView(bot))
+            removed += 1
+        except discord.Forbidden:
+            print(f"[admin_actions] Cannot delete message {message.id} (missing permissions)", flush=True)
+        except discord.HTTPException as exc:
+            print(f"[admin_actions] Delete failed {message.id}: {exc}", flush=True)
+
+    panel = await channel.send(embed=admin_actions_embed(), view=AdminActionsView(bot))
+    print(
+        f"[admin_actions] Posted panel in #{channel.name} (deleted {removed} old bot message(s), id={panel.id})",
+        flush=True,
+    )
     return channel
 
 
@@ -145,28 +163,38 @@ class AdminActionsCog(commands.Cog):
     async def cog_load(self) -> None:
         self.bot.add_view(AdminActionsView(self.bot))
 
+    async def _refresh_all_guild_panels(self) -> None:
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(2)
+        for guild in self.bot.guilds:
+            try:
+                await refresh_admin_actions_panel(guild, self.bot)
+            except Exception as exc:
+                print(f"[admin_actions] Panel refresh failed for {guild.id}: {exc!r}", flush=True)
+
     @commands.Cog.listener()
     async def on_ready(self) -> None:
         if self._panel_posted:
             return
         self._panel_posted = True
-        for guild in self.bot.guilds:
-            try:
-                ch = await refresh_admin_actions_panel(guild, self.bot)
-                if ch:
-                    print(f"[admin_actions] Panel refreshed in #{ch.name}", flush=True)
-            except Exception as exc:
-                print(f"[admin_actions] Panel refresh failed for {guild.id}: {exc!r}", flush=True)
+        self.bot.loop.create_task(self._refresh_all_guild_panels())
 
     @commands.command(name="admin_actions_panel")
     @commands.has_role(ROLE_ADMIN)
     @commands.guild_only()
     async def admin_actions_panel(self, ctx: commands.Context) -> None:
+        """ADMIN: delete old panels and post Start pre-vote / Start vote (run in #admin-actions)."""
         if ctx.channel.name.lower() != CHANNEL_ADMIN_ACTIONS:
             await ctx.send(f"Please run this in **#{CHANNEL_ADMIN_ACTIONS}**.")
             return
-        await refresh_admin_actions_panel(ctx.guild, self.bot)
-        await ctx.send("Admin actions panel refreshed.", delete_after=8)
+        ch = await refresh_admin_actions_panel(ctx.guild, self.bot)
+        if ch:
+            await ctx.send(
+                f"Panel refreshed in {ch.mention}. Use the **newest** message (title: **Game controls**).",
+                delete_after=15,
+            )
+        else:
+            await ctx.send(f"Could not find **#{CHANNEL_ADMIN_ACTIONS}**.", delete_after=10)
 
 
 async def setup(bot: commands.Bot):
