@@ -423,8 +423,8 @@ class SchedulerCog(commands.Cog):
         opener = discord.Embed(
             title="YOU CHOOSE YOUR TICKER",
             description=(
-                "Click **Open Picker**, type part or all of a ticker with or without `$`, "
-                "and the system will complete it to the best valid match.\n\n"
+                "Click **Open Picker**, then use the **dropdown** or **Search symbol** "
+                "Use the **dropdown** or **Search symbol** (type letters, then pick from the list).\n\n"
                 "Need ideas? Click **Show 20 Examples** for twenty sample stocks (names and prices). "
                 "Then use **Show 20 more** on that private message to load the next twenty, as many times as you like."
             ),

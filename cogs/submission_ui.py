@@ -52,34 +52,59 @@ def _search_first_options() -> List[discord.SelectOption]:
     ]
 
 
+def _option_description(row: dict, *, fallback: str = "NASDAQ/NYSE") -> str:
+    name = (row.get("shortName") or row.get("exchange") or fallback) if isinstance(row, dict) else fallback
+    return str(name)[:90]
+
+
 def search_matches(ch: discord.TextChannel, query: str) -> List[discord.SelectOption]:
+    """Build up to 25 select options: prefix match on examples + Yahoo search, cap-sorted."""
     q = query.upper().strip().lstrip("$")
     category = category_for_channel(ch.name)
-    example_symbols = EXAMPLE_STOCKS.get(category, [])[:40]
-    rows = search_symbols_by_query(q, category=category, limit=25)
-    options: List[discord.SelectOption] = []
+    example_symbols = EXAMPLE_STOCKS.get(category, [])[:80]
+    rows = search_symbols_by_query(q, category=category, limit=25) if q else []
+
+    ranked: list[tuple[int, str, dict | None]] = []
     seen: set[str] = set()
+
+    def add(symbol: str, row: dict | None, *, rank: int) -> None:
+        sym = symbol.upper().strip()
+        if not sym or sym in seen:
+            return
+        seen.add(sym)
+        ranked.append((rank, sym, row))
+
     for symbol in example_symbols:
-        if q and not symbol.startswith(q):
+        if q:
+            if symbol == q:
+                add(symbol, None, rank=0)
+            elif symbol.startswith(q):
+                add(symbol, None, rank=1)
+        else:
+            add(symbol, None, rank=2)
+
+    for row in rows:
+        symbol = str(row.get("symbol", "")).upper()
+        if not symbol:
             continue
-        seen.add(symbol)
+        if symbol == q:
+            add(symbol, row, rank=0)
+        elif q and symbol.startswith(q):
+            add(symbol, row, rank=1)
+        else:
+            add(symbol, row, rank=3)
+
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    options: List[discord.SelectOption] = []
+    for _, symbol, row in ranked[:25]:
+        desc = _option_description(row or {}, fallback="Example / search match")
         options.append(
             discord.SelectOption(
                 label=f"${symbol}",
                 value=symbol,
-                description="Example stock from this category.",
+                description=desc,
             )
         )
-        if len(options) >= 25:
-            return options
-    for row in rows[:25]:
-        symbol = row["symbol"].upper()
-        if symbol in seen:
-            continue
-        name = (row.get("shortName") or row.get("exchange") or "NASDAQ/NYSE common stock")[:90]
-        options.append(discord.SelectOption(label=f"${symbol}", value=symbol, description=name))
-        if len(options) >= 25:
-            break
     return options
 
 
@@ -436,13 +461,13 @@ class ExampleTickerSelect(discord.ui.Select):
             pass
 
 
-class SearchModal(discord.ui.Modal, title="Search tickers"):
+class SearchModal(discord.ui.Modal, title="Search by symbol"):
     query: discord.ui.TextInput = discord.ui.TextInput(
-        label="Type ticker letters",
-        placeholder="AAPL, aapl, or $AAPL",
+        label="Type the start of a ticker",
+        placeholder="e.g. NV → NVDA, NVO…",
         min_length=1,
-        max_length=8,
-        required=True
+        max_length=10,
+        required=True,
     )
 
     def __init__(self, parent_view: "StockPickerView"):
@@ -450,16 +475,134 @@ class SearchModal(discord.ui.Modal, title="Search tickers"):
         self.parent_view = parent_view
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.InteractionResponded:
-            pass
-
         if self.parent_view.frozen:
-            await interaction.followup.send("You already submitted a ticker for this channel.", ephemeral=True)
+            await interaction.response.send_message(
+                "You already submitted a ticker for this channel.",
+                ephemeral=True,
+            )
             return
 
-        await self.parent_view.submit_query(interaction, str(self.query.value))
+        q = str(self.query.value).upper().strip().lstrip("$")
+        options = search_matches(self.parent_view.channel, q)
+        if not options:
+            await interaction.response.send_message(
+                f"No matches for **{q}** in this cap category. Try fewer letters or another symbol.",
+                ephemeral=True,
+            )
+            return
+
+        view = TickerMatchSelectView(
+            self.parent_view.channel,
+            self.parent_view.user_id,
+            self.parent_view.message_id,
+            options,
+            query=q,
+        )
+        await interaction.response.send_message(
+            f"**Matches for `{q}`** — pick the correct stock:",
+            view=view,
+            ephemeral=True,
+        )
+
+
+class TickerMatchSelect(discord.ui.Select):
+    def __init__(
+        self,
+        *,
+        channel: discord.TextChannel,
+        user_id: int,
+        picker_message_id: int | None,
+        options: List[discord.SelectOption],
+        query: str,
+    ):
+        super().__init__(
+            placeholder="Choose a ticker from the list…",
+            min_values=1,
+            max_values=1,
+            options=options[:25],
+            row=0,
+        )
+        self.channel = channel
+        self.user_id = user_id
+        self.picker_message_id = picker_message_id
+        self.query = query
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        ticker = self.values[0].upper()
+        picker = StockPickerView(self.channel, self.user_id)
+        picker.message_id = self.picker_message_id
+        picker.frozen = False
+        await picker.submit_ticker(interaction, ticker, typed_hint=self.query)
+
+
+class TickerMatchSelectView(discord.ui.View):
+    def __init__(
+        self,
+        channel: discord.TextChannel,
+        user_id: int,
+        picker_message_id: int | None,
+        options: List[discord.SelectOption],
+        *,
+        query: str,
+    ):
+        super().__init__(timeout=300)
+        self.add_item(
+            TickerMatchSelect(
+                channel=channel,
+                user_id=user_id,
+                picker_message_id=picker_message_id,
+                options=options,
+                query=query,
+            )
+        )
+
+        back = discord.ui.Button(label="Search again", style=discord.ButtonStyle.secondary, row=1)
+        back.callback = self._search_again
+        self.add_item(back)
+
+        self._channel = channel
+        self._user_id = user_id
+        self._picker_message_id = picker_message_id
+
+    async def _search_again(self, interaction: discord.Interaction) -> None:
+        picker = StockPickerView(self._channel, self._user_id)
+        picker.message_id = self._picker_message_id
+        await interaction.response.send_modal(SearchModal(picker))
+
+
+class QuickPickSelect(discord.ui.Select):
+    def __init__(self, channel: discord.TextChannel, user_id: int, options: List[discord.SelectOption]):
+        placeholder = "Quick pick — popular symbols in this category"
+        if not options:
+            options = [
+                discord.SelectOption(
+                    label="Use Search symbol below",
+                    value="__search_hint__",
+                    description="Type letters to find your ticker",
+                )
+            ]
+        super().__init__(
+            placeholder=placeholder,
+            min_values=1,
+            max_values=1,
+            options=options[:25],
+            row=0,
+        )
+        self.channel = channel
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        ticker = self.values[0].upper()
+        if ticker == "__search_hint__":
+            await interaction.response.send_message(
+                "Use **Search symbol** below and type the first letters of the ticker.",
+                ephemeral=True,
+            )
+            return
+        picker = StockPickerView(self.channel, self.user_id)
+        if interaction.message:
+            picker.message_id = interaction.message.id
+        await picker.submit_ticker(interaction, ticker)
 
 
 class StockPickerView(discord.ui.View):
@@ -470,25 +613,104 @@ class StockPickerView(discord.ui.View):
         self.message_id: int | None = None
         self.frozen: bool = False
 
-        self.submit_btn = discord.ui.Button(
-            label="Try Ticker",
-            style=discord.ButtonStyle.success,
-            row=0
-        )
-        self.submit_btn.callback = self.on_submit
-        self.add_item(self.submit_btn)
+        quick = search_matches(channel, "")
+        self.quick_select = QuickPickSelect(channel, user_id, quick)
+        self.add_item(self.quick_select)
 
-    async def on_submit(self, interaction: discord.Interaction):
+        self.search_btn = discord.ui.Button(
+            label="Search symbol…",
+            style=discord.ButtonStyle.primary,
+            row=1,
+        )
+        self.search_btn.callback = self.on_search
+        self.add_item(self.search_btn)
+
+    async def on_search(self, interaction: discord.Interaction) -> None:
         if self.frozen:
-            try:
-                await interaction.response.defer(ephemeral=True)
-            except discord.InteractionResponded:
-                pass
-            await interaction.followup.send(
-                "You already submitted a ticker for this channel.", ephemeral=True
+            await interaction.response.send_message(
+                "You already submitted a ticker for this channel.",
+                ephemeral=True,
             )
             return
         await interaction.response.send_modal(SearchModal(self))
+
+    async def submit_ticker(
+        self,
+        interaction: discord.Interaction,
+        ticker: str,
+        *,
+        typed_hint: str | None = None,
+    ) -> None:
+        """Validate and save a chosen symbol (from dropdown or quick pick)."""
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+        except discord.InteractionResponded:
+            pass
+
+        if self.frozen:
+            await interaction.followup.send(
+                "You already submitted a ticker for this channel.",
+                ephemeral=True,
+            )
+            return
+
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.followup.send("This can only be used in a server.", ephemeral=True)
+            return
+        if not _can_choose_weekly_ticker(interaction.user):
+            await interaction.followup.send(
+                "Only PLAYER subscribers, active WINNERS, and admins can choose weekly tickers.",
+                ephemeral=True,
+            )
+            return
+
+        key = (self.channel.id, interaction.user.id)
+        already_picked = key in _picks_done
+        try:
+            already_picked = already_picked or database.user_has_ticker_pick(
+                self.channel.guild.id,
+                database.ticker_selection_week_key_for(),
+                category_for_channel(self.channel.name),
+                interaction.user.id,
+            )
+        except Exception:
+            pass
+        try:
+            if shared_state:
+                if hasattr(shared_state, "has_user_pick"):
+                    already_picked = already_picked or shared_state.has_user_pick(
+                        self.channel.id, interaction.user.id
+                    )
+                elif hasattr(shared_state, "user_has_pick"):
+                    already_picked = already_picked or shared_state.user_has_pick(
+                        self.channel.id, interaction.user.id
+                    )
+        except Exception:
+            pass
+
+        if already_picked:
+            await interaction.followup.send(
+                "You already submitted a ticker for this channel.",
+                ephemeral=True,
+            )
+            return
+
+        typed = (typed_hint or ticker).upper().strip().lstrip("$")
+        status_msg = await interaction.followup.send(
+            f"Submitting **${ticker.upper()}**…",
+            ephemeral=True,
+            wait=True,
+        )
+        asyncio.create_task(
+            self._finish_ticker_submit(
+                interaction,
+                status_msg=status_msg,
+                query=ticker,
+                typed=typed,
+                key=key,
+            )
+        )
 
     def _complete_ticker(self, query: str) -> tuple[str, dict] | None:
         q = query.upper().strip().lstrip("$")
@@ -538,73 +760,10 @@ class StockPickerView(discord.ui.View):
                 return symbol, market_row
         return None
 
-    async def submit_query(self, interaction: discord.Interaction, query: str):
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-        except discord.InteractionResponded:
-            pass
-
-        if self.frozen:
-            await interaction.followup.send(
-                "You already submitted a ticker for this channel.", ephemeral=True
-            )
-            return
-
-        if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            await interaction.followup.send("This can only be used in a server.", ephemeral=True)
-            return
-        if not _can_choose_weekly_ticker(interaction.user):
-            await interaction.followup.send(
-                "Only PLAYER subscribers, active WINNERS, and admins can choose weekly tickers.",
-                ephemeral=True,
-            )
-            return
-
-        key = (self.channel.id, interaction.user.id)
-
-        already_picked = key in _picks_done
-        try:
-            already_picked = already_picked or database.user_has_ticker_pick(
-                self.channel.guild.id,
-                database.ticker_selection_week_key_for(),
-                category_for_channel(self.channel.name),
-                interaction.user.id,
-            )
-        except Exception:
-            pass
-        try:
-            if shared_state:
-                if hasattr(shared_state, "has_user_pick"):
-                    already_picked = already_picked or shared_state.has_user_pick(
-                        self.channel.id, interaction.user.id)
-                elif hasattr(shared_state, "user_has_pick"):
-                    already_picked = already_picked or shared_state.user_has_pick(
-                        self.channel.id, interaction.user.id)
-        except Exception:
-            pass
-
-        if already_picked:
-            await interaction.followup.send(
-                "You already submitted a ticker for this channel.", ephemeral=True
-            )
-            return
-
-        typed = query.upper().strip().lstrip("$")
-        status_msg = await interaction.followup.send(
-            f"YOU HAVE PICKED **${typed}**\nSaving your submission…",
-            ephemeral=True,
-            wait=True,
-        )
-        asyncio.create_task(
-            self._finish_ticker_submit(
-                interaction,
-                status_msg=status_msg,
-                query=query,
-                typed=typed,
-                key=key,
-            )
-        )
+    def _freeze_controls(self) -> None:
+        self.frozen = True
+        self.search_btn.disabled = True
+        self.quick_select.disabled = True
 
     async def _finish_ticker_submit(
         self,
@@ -616,17 +775,24 @@ class StockPickerView(discord.ui.View):
         key: Tuple[int, int],
     ) -> None:
         try:
-            completed = await asyncio.to_thread(self._complete_ticker, query)
-            if not completed:
-                await status_msg.edit(
-                    content=(
-                        "Could not complete that input to a valid stock for this category. "
-                        "Press **Try Ticker** again and enter another symbol."
+            category = category_for_channel(self.channel.name)
+            sym = query.upper().strip().lstrip("$")
+            market_row = finnhub_validate_symbol(sym, category)
+            if not market_row:
+                market_row = validate_symbol_for_category(sym, category)
+            if market_row:
+                ticker, market_row = sym, market_row
+            else:
+                completed = await asyncio.to_thread(self._complete_ticker, query)
+                if not completed:
+                    await status_msg.edit(
+                        content=(
+                            "That symbol is not valid for this cap category. "
+                            "Use **Search symbol** and pick from the dropdown."
+                        )
                     )
-                )
-                return
-
-            ticker, market_row = completed
+                    return
+                ticker, market_row = completed
             cat_idx = _category_index_for_channel(self.channel)
             ok, reason, count_now = await _try_add_ticker_to_pick_results(
                 guild=interaction.guild,
@@ -654,8 +820,7 @@ class StockPickerView(discord.ui.View):
                     )
                     return
                 if reason == "full":
-                    self.frozen = True
-                    self.submit_btn.disabled = True
+                    self._freeze_controls()
                     try:
                         if self.message_id:
                             await interaction.followup.edit_message(
@@ -687,8 +852,7 @@ class StockPickerView(discord.ui.View):
                 pass
 
             _picks_done.add(key)
-            self.frozen = True
-            self.submit_btn.disabled = True
+            self._freeze_controls()
 
             try:
                 if self.message_id:
@@ -736,91 +900,7 @@ class StockPickerView(discord.ui.View):
 # ===== TESTING VARIANT (does NOT enforce one-submission-per-user) =====
 
 class TestingStockPickerView(StockPickerView):
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.InteractionResponded:
-            pass
-
-        if self.frozen:
-            await interaction.followup.send(
-                "You already submitted a ticker for this channel.", ephemeral=True
-            )
-            return
-
-        if not self.select.values:
-            await interaction.followup.send("Pick a ticker first.", ephemeral=True)
-            return
-
-        ticker = self.select.values[0].upper()
-
-        cat_idx = _category_index_for_channel(self.channel)
-        ok, reason, count_now = await _try_add_ticker_to_pick_results(
-            guild=interaction.guild, category_idx=cat_idx, ticker=ticker
-        )
-
-        if not ok:
-            if reason == "not_found":
-                await interaction.followup.send(
-                    "Could not locate the **pick-results** embed. Ask an admin to run `!prep_pick_results_demo`.",
-                    ephemeral=True
-                )
-                return
-            if reason == "duplicate":
-                await interaction.followup.send(
-                    "That ticker is already in the list. Please pick a different ticker.",
-                    ephemeral=True
-                )
-                return
-            if reason == "full":
-                self.frozen = True
-                self.submit_btn.disabled = True
-                self.search_btn.disabled = True
-                self.select.disabled = True
-                try:
-                    if self.message_id:
-                        await interaction.followup.edit_message(self.message_id, view=self)
-                except Exception:
-                    pass
-                await interaction.followup.send(
-                    f"This category already has {TICKER_LIMIT_PER_CATEGORY} unique tickers. Please try a different channel.",
-                    ephemeral=True
-                )
-                return
-
-        self.frozen = True
-        self.submit_btn.disabled = True
-        self.search_btn.disabled = True
-        self.select.disabled = True
-        try:
-            if self.message_id:
-                await interaction.followup.edit_message(self.message_id, view=self)
-        except Exception:
-            pass
-
-        _picker_open.pop((self.channel.id, interaction.user.id), None)
-
-        if count_now is not None and count_now >= TICKER_LIMIT_PER_CATEGORY:
-            try:
-                await self.channel.send(
-                    embed=_closed_banner_embed(interaction.guild, count=count_now)
-                )
-            except Exception:
-                pass
-            try:
-                await _post_mod_log_submission_closed(
-                    guild=interaction.guild,
-                    cat_idx=cat_idx,
-                    ch=self.channel,
-                    count=count_now,
-                    triggered_by=interaction.user
-                    if isinstance(interaction.user, discord.Member)
-                    else None,
-                )
-            except Exception:
-                pass
-
-        await interaction.followup.send(f"Ticker ${ticker} has been submitted.", ephemeral=True)
+    """Same dropdown/search UI as production; testing commands may relax pick limits elsewhere."""
 
 
 def _embeds_from_example_lines(title: str, lines: list[str]) -> list[discord.Embed]:
@@ -984,8 +1064,9 @@ class OpenPickerView(discord.ui.View):
 
             sent = await interaction.followup.send(
                 content=(
-                    "Click **Try Ticker**, type part or all of a ticker with or without `$`, "
-                    "and the system will complete it to the best valid match."
+                    "**Pick a stock for this category:**\n"
+                    "• Use the **dropdown** for popular symbols, or\n"
+                    "• **Search symbol…** — type the first letters (e.g. `NV`) and choose from the list."
                 ),
                 view=view,
                 ephemeral=True
@@ -1172,8 +1253,8 @@ class SubmissionUICog(commands.Cog):
         embed = discord.Embed(
             title="CHOOSE YOUR TICKER",
             description=(
-                "Click **Open Picker**, type part or all of a ticker with or without `$`, "
-                "and the system will complete it to the best valid match.\n\n"
+                "Click **Open Picker**, then use the **dropdown** or **Search symbol** "
+                "(type the first letters and pick from the list).\n\n"
                 "Need ideas? Click **Show 20 Examples** for twenty sample stocks (names and prices). "
                 "Then use **Show 20 more** on that private message to load the next twenty, as many times as you like."
             ),
