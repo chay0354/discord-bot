@@ -366,7 +366,7 @@ def list_ticker_pick_rows(guild_id: int, week_key: str) -> list[dict[str, Any]]:
     return _select(
         "ticker_picks",
         (
-            f"?select=id,category,ticker,market_cap"
+            f"?select=id,category,ticker,market_cap,submitted_by"
             f"&guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
             f"&order=ticker.asc"
         ),

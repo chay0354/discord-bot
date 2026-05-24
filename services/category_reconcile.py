@@ -55,12 +55,22 @@ def reconcile_ticker_categories(guild_id: int, week_key: str) -> list[CategoryMo
         for row in pick_rows:
             old_cat = row["category"]
             pick_id = int(row["id"])
+            submitted_by = row.get("submitted_by")
             if old_cat == new_cat:
                 if market_cap is not None:
                     database.update_ticker_pick_market_cap(pick_id, market_cap)
                 continue
 
+            drop_pick = False
             if database.ticker_in_category(guild_id, week_key, new_cat, ticker):
+                drop_pick = True
+            elif submitted_by is not None and database.user_has_ticker_pick(
+                guild_id, week_key, new_cat, int(submitted_by)
+            ):
+                # Same user already has a different ticker in the target category.
+                drop_pick = True
+
+            if drop_pick:
                 database.delete_ticker_pick(pick_id)
             else:
                 database.update_ticker_pick_category(pick_id, new_cat, market_cap)
