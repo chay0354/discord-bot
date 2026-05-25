@@ -45,6 +45,7 @@ from cogs.weekly_picks import (
     _category_idx_to_weekly_name,
     _category_title,
     _delete_bot_messages,
+    _purge_channel_messages,
     # NEW: use the same builder that includes the live T-minus line,
     # and the canonical end-of-window calculator
     _build_voting_open_embed,
@@ -301,9 +302,9 @@ class SchedulerCog(commands.Cog):
             tickers = lists[cat] if cat < len(lists) else []
             per_cat_counts[cat] = len(tickers)
 
-            # Clean old bot messages so only the new banner remains
+            # Wipe everything so only the new voting banner remains
             try:
-                await _delete_bot_messages(ch, guild, limit=400)
+                await _purge_channel_messages(ch, guild, limit=500)
             except Exception:
                 pass
 
@@ -347,7 +348,7 @@ class SchedulerCog(commands.Cog):
             if not tch:
                 continue
             try:
-                await _delete_bot_messages(tch, guild, limit=200)
+                await _purge_channel_messages(tch, guild, limit=500)
             except Exception:
                 pass
             try:
@@ -434,7 +435,7 @@ class SchedulerCog(commands.Cog):
             ch = _find_text_channel(guild, name)
             if not ch:
                 continue
-            await _delete_bot_messages(ch, guild, limit=200)
+            await _purge_channel_messages(ch, guild, limit=500)
             await ch.send(embed=opener, view=OpenPickerView(channel=ch, user_id=0))
 
     async def _restart_pre_voting_one_guild(self, guild: discord.Guild, actor_id: int | None = None) -> None:
@@ -467,13 +468,13 @@ class SchedulerCog(commands.Cog):
         for name in (CHANNEL_SMALL_VOTE, CHANNEL_MID_VOTE, CHANNEL_BLUE_VOTE):
             ch = _find_text_channel(guild, name)
             if ch:
-                await _delete_bot_messages(ch, guild, limit=300)
+                await _purge_channel_messages(ch, guild, limit=500)
                 await ch.send(embed=stopped)
 
         for name in (CHANNEL_SMALL_LIVE, CHANNEL_MID_LIVE, CHANNEL_BLUE_LIVE):
             ch = _find_text_channel(guild, name)
             if ch:
-                await _delete_bot_messages(ch, guild, limit=200)
+                await _purge_channel_messages(ch, guild, limit=500)
         for cat in range(3):
             try:
                 await _post_or_update_leaderboard(guild, cat)
@@ -602,7 +603,7 @@ class SchedulerCog(commands.Cog):
         for name in (CHANNEL_SMALL_VOTE, CHANNEL_MID_VOTE, CHANNEL_BLUE_VOTE):
             ch = _find_text_channel(guild, name)
             if ch:
-                await _delete_bot_messages(ch, guild, limit=300)
+                await _purge_channel_messages(ch, guild, limit=500)
                 await ch.send(embed=closed)
 
         leaderboard = _find_text_channel(guild, CHANNEL_FINAL_LEADERBOARD)

@@ -796,6 +796,50 @@ async def _delete_bot_messages(ch: discord.TextChannel, guild: discord.Guild, li
     return count
 
 
+async def _purge_channel_messages(
+    ch: discord.TextChannel,
+    guild: discord.Guild,
+    limit: int = 400,
+) -> int:
+    """Wipe every message (bot or user) in a channel.
+
+    Uses bulk delete for messages younger than 14 days, then falls back to
+    one-by-one deletes for anything older. Falls back to bot-only deletes if
+    the bot lacks the Manage Messages permission.
+    """
+    me = guild.me
+    can_manage = bool(
+        me
+        and ch.permissions_for(me).manage_messages
+        and ch.permissions_for(me).read_message_history
+    )
+    if not can_manage:
+        return await _delete_bot_messages(ch, guild, limit=limit)
+
+    deleted_total = 0
+    try:
+        purged = await ch.purge(limit=limit, bulk=True, reason="Weekly cycle reset")
+        deleted_total += len(purged)
+    except discord.Forbidden:
+        return await _delete_bot_messages(ch, guild, limit=limit)
+    except discord.HTTPException:
+        pass
+
+    # purge() skips messages >14 days old; clean them up individually.
+    try:
+        async for msg in ch.history(limit=limit):
+            try:
+                await msg.delete()
+                deleted_total += 1
+            except discord.Forbidden:
+                break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return deleted_total
+
+
 def _weekly_closed_banner() -> discord.Embed:
     emb = discord.Embed(
         title="VOTING CLOSED",
