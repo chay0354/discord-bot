@@ -860,16 +860,7 @@ def _open_picker_embed() -> discord.Embed:
     )
 
 
-# ===================== Countdown banner helpers =====================
-
-def _format_tminus(end_utc: datetime, now_utc: Optional[datetime] = None) -> str:
-    now = (now_utc or datetime.now(tz=UTC)).astimezone(UTC)
-    secs = max(0, int((end_utc - now).total_seconds()))
-    h = secs // 3600
-    m = (secs % 3600) // 60
-    s = secs % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
+# ===================== Banner helpers =====================
 
 def _banner_description_with_timer(cat: int, end_utc: Optional[datetime]) -> str:
     live_ch = _category_idx_to_live_name(cat)
@@ -883,12 +874,11 @@ def _banner_description_with_timer(cat: int, end_utc: Optional[datetime]) -> str
     )
     if end_utc is None:
         return base
-    et_str = _format_et(end_utc)
     unix = int(end_utc.timestamp())
     return (
         f"{base}\n\n"
-        f"**Early winner window ends:** {et_str} — <t:{unix}:F> • <t:{unix}:R>\n"
-        f"⏳ **T‑minus:** {_format_tminus(end_utc)}"
+        f"⏳ **Early winner window ends in:** <t:{unix}:R>\n"
+        f"(ends <t:{unix}:F>)"
     )
 
 
@@ -993,11 +983,6 @@ class WeeklyPicksCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._timer_task: Optional[asyncio.Task] = None
-
-    async def cog_load(self):
-        self._timer_task = asyncio.create_task(
-            self._countdown_updater(), name="weekly_countdown_updater")
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -1008,10 +993,6 @@ class WeeklyPicksCog(commands.Cog):
             )
             if open_:
                 await asyncio.to_thread(hydrate_vote_state, guild.id, week_key)
-
-    def cog_unload(self):
-        if self._timer_task and not self._timer_task.done():
-            self._timer_task.cancel()
 
     # --- ADMIN helper: sanity-check layout; tiny, non-invasive test command ---
     @commands.command(name="weekly_status")
@@ -1267,11 +1248,6 @@ class WeeklyPicksCog(commands.Cog):
         now = datetime.now(tz=UTC)
         arm_early_window(now)
         until = now + timedelta(hours=24)
-        # Update existing VOTING OPEN banners to start showing timer immediately
-        try:
-            await self._update_all_guild_banners_once()
-        except Exception:
-            pass
         emb = discord.Embed(
             title="Early Window Armed",
             description=f"Start (UTC): **{now:%Y-%m-%d %H:%M}**\nEnd (UTC): **{until:%Y-%m-%d %H:%M}**",
@@ -1299,39 +1275,6 @@ class WeeklyPicksCog(commands.Cog):
         emb = discord.Embed(title="Early Window — Status",
                             description=desc, color=discord.Color.blurple())
         await ctx.send(embed=emb)
-
-    # ---------------- Countdown updater (runs every ~60s during early window) ----------------
-
-    async def _update_all_guild_banners_once(self):
-        """Refresh the timer on the VOTING OPEN instruction card."""
-        end = early_window_end_utc()
-        if end is None:
-            return
-        for guild in list(self.bot.guilds):
-            for cat in range(3):
-                msg = await _get_or_cache_voting_open_message(guild, cat)
-                if not msg:
-                    continue
-                try:
-                    await msg.edit(embed=_build_voting_open_embed(cat, end))
-                except Exception:
-                    pass
-
-    async def _countdown_updater(self):
-        await self.bot.wait_until_ready()
-        while not self.bot.is_closed():
-            try:
-                # only update when early window is active
-                if is_early_window_active():
-                    await self._update_all_guild_banners_once()
-                # gentle, avoids ratelimits; still looks “alive”
-                await asyncio.sleep(60)
-            except asyncio.CancelledError:
-                return
-            except Exception:
-                # swallow errors to keep the loop alive
-                await asyncio.sleep(60)
-
 
 # -------- Extension hook (required by discord.py to load this cog) --------
 

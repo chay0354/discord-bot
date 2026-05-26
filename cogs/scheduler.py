@@ -45,7 +45,7 @@ from cogs.weekly_picks import (
     _category_title,
     _delete_bot_messages,
     _purge_channel_messages,
-    # NEW: use the same builder that includes the live T-minus line,
+    # Voting banner builder (includes live Discord relative timestamp)
     # and the canonical end-of-window calculator
     _build_voting_open_embed,
     early_window_end_utc,
@@ -288,7 +288,7 @@ class SchedulerCog(commands.Cog):
         except Exception:
             pass
 
-        # 3) Push to WEEKLY channels as active voting (VOTING OPEN + live T-minus + buttons)
+        # 3) Push to WEEKLY channels as active voting (VOTING OPEN + live timer + buttons)
         updated = 0
         per_cat_counts: List[int] = [0, 0, 0]
         for cat in range(3):
@@ -306,7 +306,7 @@ class SchedulerCog(commands.Cog):
             except Exception:
                 pass
 
-            # Build the banner using the same builder as weekly_picks (includes ⏳ T-minus).
+            # Build the banner using the same builder as weekly_picks (includes live countdown).
             banner = _build_voting_open_embed(cat, end_utc)
             if not tickers:
                 # Voting is only from subscriber-selected tickers.
