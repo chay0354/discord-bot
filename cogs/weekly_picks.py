@@ -390,7 +390,6 @@ def _leaderboard_embed(
         description=desc,
         color=_ROSTER_COLORS[cat] if cat < len(_ROSTER_COLORS) else discord.Color.dark_teal(),
     )
-    emb.set_footer(text="Name & price refresh with votes · Ties: alphabetical")
     return emb
 
 
