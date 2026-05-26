@@ -41,7 +41,9 @@ load_dotenv(ROOT.parent / ".env")
 from config import (
     CHANNEL_FINAL_LEADERBOARD,
     CHANNEL_PICK_RESULTS,
+    CHANNEL_PLAYER,
     CHANNEL_WINNERS,
+    PLAYER_CHANNEL_CANDIDATES,
     ROLE_ADMIN,
     ROLE_NPC,
     ROLE_PLAYER,
@@ -235,7 +237,26 @@ def main() -> int:
             print("  -> updated overwrites: @everyone hidden, PLAYER/WINNER view, ADMIN view+send")
         else:
             print("  would update overwrites to: @everyone hidden, PLAYER/WINNER view, ADMIN view+send")
-    elif False:
+
+    print("\n--- Fix 4: Subscribe / PLAYER channel ---")
+    subscribe_candidates = [CHANNEL_PLAYER, *PLAYER_CHANNEL_CANDIDATES]
+    found_subscribe: dict | None = None
+    for name in subscribe_candidates:
+        c = find_channel_by_exact_name(channels, name)
+        if c:
+            found_subscribe = c
+            break
+    if not found_subscribe:
+        print(f"[WARN] No subscribe channel found. Looked for: {', '.join(subscribe_candidates)}")
+    else:
+        print(f"Channel: #{found_subscribe['name']} (id={found_subscribe['id']})")
+        new_ow = public_view_overwrites(roles, GUILD_ID)
+        if APPLY:
+            patch_channel(found_subscribe["id"], {"permission_overwrites": new_ow})
+            print("  -> updated overwrites: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
+        else:
+            print("  would update overwrites to: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
+    if False:
         similar = find_similar_channels(channels, ["pic-results", "pic_result", "pick-result", "pickresult", "picks", "pickresults"])
         if similar:
             print(f"[STOP] '{CHANNEL_PICK_RESULTS}' is missing, but I found channel(s) that look similar:")
