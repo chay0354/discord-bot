@@ -33,7 +33,6 @@ from config import (
     ROLE_WINNER,
     TICKER_LIMIT_PER_CATEGORY,
 )
-from services.category_reconcile import CategoryMove, reconcile_ticker_categories
 from services.finnhub_client import FinnhubQuote, format_quote, quote_and_names_for_symbols
 # import OpenPickerView to re-open ticker channels without touching submission_ui.py
 from cogs.submission_ui import OpenPickerView
@@ -907,7 +906,6 @@ def _build_voting_open_embed(cat: int, end_utc: Optional[datetime]) -> discord.E
 
 async def build_final_leaderboard_embeds(guild_id: int, week_key: str) -> list[discord.Embed]:
     """End-of-week board: one embed (and Discord message) per cap category."""
-    await asyncio.to_thread(reconcile_ticker_categories, guild_id, week_key)
     counts = database.all_vote_counts(guild_id, week_key)
     all_syms: list[str] = []
     for cat in ("small", "mid", "blue"):
@@ -997,14 +995,10 @@ class WeeklyPicksCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._timer_task: Optional[asyncio.Task] = None
-        self._reconcile_task: Optional[asyncio.Task] = None
 
     async def cog_load(self):
-        # start the countdown updater loop
         self._timer_task = asyncio.create_task(
             self._countdown_updater(), name="weekly_countdown_updater")
-        self._reconcile_task = asyncio.create_task(
-            self._category_reconcile_loop(), name="weekly_category_reconcile")
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -1017,66 +1011,8 @@ class WeeklyPicksCog(commands.Cog):
                 await asyncio.to_thread(hydrate_vote_state, guild.id, week_key)
 
     def cog_unload(self):
-        for task in (self._timer_task, self._reconcile_task):
-            if task and not task.done():
-                task.cancel()
-
-    async def apply_category_moves(self, guild: discord.Guild, moves: list[CategoryMove]) -> None:
-        """Sync in-memory vote tallies and refresh vote buttons on affected channels."""
-        if not moves:
-            return
-        affected: set[str] = set()
-        for move in moves:
-            affected.add(move.from_category)
-            affected.add(move.to_category)
-            try:
-                from_idx = CATEGORIES.index(move.from_category)
-                to_idx = CATEGORIES.index(move.to_category)
-            except ValueError:
-                continue
-            for uid, tickers in list(_user_votes[from_idx].items()):
-                if move.ticker in tickers:
-                    tickers.discard(move.ticker)
-                    _user_votes[to_idx].setdefault(uid, set()).add(move.ticker)
-            count = _vote_counts[from_idx].pop(move.ticker, 0)
-            if count:
-                _vote_counts[to_idx][move.ticker] = _vote_counts[to_idx].get(move.ticker, 0) + count
-
-        week_key = database.week_key_for()
-        lists = database.list_tickers(guild.id, week_key)
-        for cat_name in affected:
-            try:
-                cat_idx = CATEGORIES.index(cat_name)
-            except ValueError:
-                continue
-            tickers = lists.get(cat_name, [])
-            view = await build_weekly_voting_view(cat_idx, tickers, fetch_quotes=False)
-            self.bot.add_view(view)
-            msg = await _get_or_cache_voting_open_message(guild, cat_idx)
-            if msg:
-                try:
-                    await msg.edit(view=view)
-                except Exception:
-                    pass
-            _schedule_leaderboard_update(guild, cat_idx)
-
-    async def _category_reconcile_loop(self) -> None:
-        await self.bot.wait_until_ready()
-        while not self.bot.is_closed():
-            try:
-                for guild in self.bot.guilds:
-                    week_key = database.week_key_for()
-                    if not database.is_voting_open(guild.id, week_key):
-                        continue
-                    moves = await asyncio.to_thread(
-                        reconcile_ticker_categories, guild.id, week_key
-                    )
-                    await self.apply_category_moves(guild, moves)
-            except asyncio.CancelledError:
-                return
-            except Exception:
-                pass
-            await asyncio.sleep(300)
+        if self._timer_task and not self._timer_task.done():
+            self._timer_task.cancel()
 
     # --- ADMIN helper: sanity-check layout; tiny, non-invasive test command ---
     @commands.command(name="weekly_status")

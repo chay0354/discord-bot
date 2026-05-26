@@ -17,7 +17,6 @@ import discord
 from discord.ext import commands
 
 import database
-from services.category_reconcile import reconcile_ticker_categories
 from config import (
     CATEGORY_TITLES,
     CHANNEL_BLUE_LIVE,
@@ -272,9 +271,8 @@ class SchedulerCog(commands.Cog):
             early_window_end_at=end_utc.isoformat() if end_utc else None,
         )
 
-        # 2) Read ballot from Supabase (#pic-results fallback). Do not reconcile here —
-        # the ballot should stay 20 per category as picked. Live cap changes run during
-        # voting via WeeklyPicksCog._category_reconcile_loop (every 5 min).
+        # 2) Read ballot from Supabase. Tickers stay in the cap category the user picked;
+        # we do not reclassify them based on live market-cap changes.
         stored = database.list_tickers(guild.id, week_key)
         lists: List[List[str]] = [stored["small"], stored["mid"], stored["blue"]]
         pr_msg = None
@@ -584,7 +582,6 @@ class SchedulerCog(commands.Cog):
     async def _friday_close_one_guild(self, guild: discord.Guild) -> None:
         now_utc = _now_utc()
         week_key = database.week_key_for(now_utc)
-        await asyncio.to_thread(reconcile_ticker_categories, guild.id, week_key)
         database.set_cycle_phase(
             guild.id,
             week_key,
