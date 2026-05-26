@@ -16,7 +16,7 @@ ROLE_ADMIN = os.getenv("ROLE_ADMIN", "ADMIN")
 CHANNEL_SMALL_TICKER = "small-cap-ticker"
 CHANNEL_MID_TICKER = "mid-cap-ticker"
 CHANNEL_BLUE_TICKER = "large-cap-ticker"
-CHANNEL_PICK_RESULTS = os.getenv("PICK_RESULTS_CHANNEL", "pic-results")
+CHANNEL_PICK_RESULTS = os.getenv("PICK_RESULTS_CHANNEL", "pick-results")
 
 CHANNEL_SMALL_VOTE = "small-cap"
 CHANNEL_MID_VOTE = "mid-cap"
