@@ -260,6 +260,10 @@ def main() -> int:
         else:
             print("  would update overwrites to: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
 
+    subscribe_category_id: str | None = None
+    if found_subscribe and found_subscribe.get("parent_id"):
+        subscribe_category_id = str(found_subscribe["parent_id"])
+
     print("\n--- Fix 5: Manage subscription channel ---")
     found_manage: dict | None = None
     for name in MANAGE_SUBSCRIPTION_CHANNEL_CANDIDATES:
@@ -270,11 +274,29 @@ def main() -> int:
     if found_manage:
         print(f"Channel: #{found_manage['name']} (id={found_manage['id']})")
         new_ow = public_view_overwrites(roles, GUILD_ID)
+        manage_parent = found_manage.get("parent_id")
+        needs_category = (
+            subscribe_category_id
+            and str(manage_parent or "") != subscribe_category_id
+        )
+        if needs_category:
+            cat_name = next(
+                (c.get("name") for c in channels if str(c.get("id")) == subscribe_category_id),
+                subscribe_category_id,
+            )
+            print(f"  parent is wrong/missing — should be under category {cat_name!r}")
         if APPLY:
-            patch_channel(found_manage["id"], {"permission_overwrites": new_ow})
+            payload: dict[str, Any] = {"permission_overwrites": new_ow}
+            if needs_category:
+                payload["parent_id"] = subscribe_category_id
+            patch_channel(found_manage["id"], payload)
             print("  -> updated overwrites: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
+            if needs_category:
+                print(f"  -> moved under subscribe category (id={subscribe_category_id})")
         else:
             print("  would update overwrites to: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
+            if needs_category:
+                print(f"  would move under subscribe category (id={subscribe_category_id})")
     else:
         similar = find_similar_channels(channels, ["manage", "billing", "subscription"])
         sub_id = found_subscribe.get("id") if found_subscribe else None
@@ -291,6 +313,8 @@ def main() -> int:
                 "permission_overwrites": public_view_overwrites(roles, GUILD_ID),
                 "topic": "Manage your PLAYER subscription via Stripe billing portal.",
             }
+            if subscribe_category_id:
+                payload["parent_id"] = subscribe_category_id
             if APPLY:
                 created = create_text_channel(GUILD_ID, payload)
                 print(f"  -> created #{created['name']} (id={created['id']})")
