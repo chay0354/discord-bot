@@ -31,6 +31,7 @@ from config import (
     ROLE_NPC,
     ROLE_PLAYER,
     ROLE_WINNER,
+    SUBSCRIBE_CHANNEL_CANDIDATES,
     TICKER_LIMIT_PER_CATEGORY,
 )
 from services.finnhub_client import FinnhubQuote, format_quote, quote_and_names_for_symbols
@@ -693,8 +694,8 @@ class WeeklyVotingView(discord.ui.View):
             if mem_count >= 1:
                 reg_mention = _channel_mention_or_text(
                     guild,
-                    ["𝐏𝐋𝐀𝐘𝐄𝐑", "player", "register", "registration", "subscribe"],
-                    "#PLAYER"
+                    list(SUBSCRIBE_CHANNEL_CANDIDATES),
+                    "#subscribe",
                 )
                 await interaction.followup.send(
                     "YOU HAVE REACHED THE LIMIT OF YOUR VOTES. "
@@ -706,8 +707,8 @@ class WeeklyVotingView(discord.ui.View):
 
             reg_mention = _channel_mention_or_text(
                 guild,
-                ["𝐏𝐋𝐀𝐘𝐄𝐑", "player", "register", "registration", "subscribe"],
-                "#PLAYER"
+                list(SUBSCRIBE_CHANNEL_CANDIDATES),
+                "#subscribe",
             )
             await interaction.followup.send(
                 f"YOU HAVE PICKED ${ticker}\n"

@@ -40,10 +40,12 @@ load_dotenv(ROOT.parent / ".env")
 
 from config import (
     CHANNEL_FINAL_LEADERBOARD,
+    CHANNEL_MANAGE_SUBSCRIPTION,
     CHANNEL_PICK_RESULTS,
-    CHANNEL_PLAYER,
+    CHANNEL_SUBSCRIBE,
     CHANNEL_WINNERS,
-    PLAYER_CHANNEL_CANDIDATES,
+    MANAGE_SUBSCRIPTION_CHANNEL_CANDIDATES,
+    SUBSCRIBE_CHANNEL_CANDIDATES,
     ROLE_ADMIN,
     ROLE_NPC,
     ROLE_PLAYER,
@@ -238,16 +240,17 @@ def main() -> int:
         else:
             print("  would update overwrites to: @everyone hidden, PLAYER/WINNER view, ADMIN view+send")
 
-    print("\n--- Fix 4: Subscribe / PLAYER channel ---")
-    subscribe_candidates = [CHANNEL_PLAYER, *PLAYER_CHANNEL_CANDIDATES]
+    print("\n--- Fix 4: Subscribe to PLAYER channel ---")
     found_subscribe: dict | None = None
-    for name in subscribe_candidates:
+    for name in SUBSCRIBE_CHANNEL_CANDIDATES:
         c = find_channel_by_exact_name(channels, name)
         if c:
             found_subscribe = c
             break
     if not found_subscribe:
-        print(f"[WARN] No subscribe channel found. Looked for: {', '.join(subscribe_candidates)}")
+        print(f"[WARN] No subscribe channel found. Looked for: {', '.join(SUBSCRIBE_CHANNEL_CANDIDATES)}")
+        if not APPLY:
+            print(f"  would create #{CHANNEL_SUBSCRIBE} only if no similar channel exists")
     else:
         print(f"Channel: #{found_subscribe['name']} (id={found_subscribe['id']})")
         new_ow = public_view_overwrites(roles, GUILD_ID)
@@ -256,29 +259,43 @@ def main() -> int:
             print("  -> updated overwrites: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
         else:
             print("  would update overwrites to: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
-    if False:
-        similar = find_similar_channels(channels, ["pic-results", "pic_result", "pick-result", "pickresult", "picks", "pickresults"])
+
+    print("\n--- Fix 5: Manage subscription channel ---")
+    found_manage: dict | None = None
+    for name in MANAGE_SUBSCRIPTION_CHANNEL_CANDIDATES:
+        c = find_channel_by_exact_name(channels, name)
+        if c:
+            found_manage = c
+            break
+    if found_manage:
+        print(f"Channel: #{found_manage['name']} (id={found_manage['id']})")
+        new_ow = public_view_overwrites(roles, GUILD_ID)
+        if APPLY:
+            patch_channel(found_manage["id"], {"permission_overwrites": new_ow})
+            print("  -> updated overwrites: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
+        else:
+            print("  would update overwrites to: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
+    else:
+        similar = find_similar_channels(channels, ["manage", "billing", "subscription"])
+        sub_id = found_subscribe.get("id") if found_subscribe else None
+        similar = [c for c in similar if c.get("id") != sub_id]
         if similar:
-            print(f"[STOP] '{CHANNEL_PICK_RESULTS}' is missing, but I found channel(s) that look similar:")
+            print("[STOP] manage-subscription missing but similar channels exist (not creating duplicate):")
             for c in similar:
                 print(f"  - #{c['name']} (id={c['id']})")
-            print("Not creating a new channel to avoid a duplicate.")
-            print("Pick one:")
-            print(f"  A) Rename one of the above back to '{CHANNEL_PICK_RESULTS}', OR")
-            print(f"  B) Set env var PICK_RESULTS_CHANNEL on Railway to the actual name (e.g. '{similar[0]['name']}').")
+            print(f"Rename one to '{CHANNEL_MANAGE_SUBSCRIPTION}' or set MANAGE_SUBSCRIPTION_CHANNEL env.")
         else:
-            print(f"No channel named '{CHANNEL_PICK_RESULTS}' or anything similar was found.")
             payload = {
-                "name": CHANNEL_PICK_RESULTS,
+                "name": CHANNEL_MANAGE_SUBSCRIPTION,
                 "type": 0,
-                "permission_overwrites": subscriber_overwrites(roles, GUILD_ID),
-                "topic": "PICK RESULTS — 20 stocks per category (small / mid / large).",
+                "permission_overwrites": public_view_overwrites(roles, GUILD_ID),
+                "topic": "Manage your PLAYER subscription via Stripe billing portal.",
             }
             if APPLY:
                 created = create_text_channel(GUILD_ID, payload)
                 print(f"  -> created #{created['name']} (id={created['id']})")
             else:
-                print(f"  would create #{CHANNEL_PICK_RESULTS} with subscriber visibility")
+                print(f"  would create #{CHANNEL_MANAGE_SUBSCRIPTION}")
 
     print("\nDone.")
     if not APPLY:

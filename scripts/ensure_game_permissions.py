@@ -31,6 +31,9 @@ from config import (
     CHANNEL_SMALL_TICKER,
     CHANNEL_SMALL_VOTE,
     CHANNEL_WINNERS,
+    CHANNEL_SUBSCRIBE,
+    CHANNEL_MANAGE_SUBSCRIPTION,
+    SUBSCRIBE_CHANNEL_CANDIDATES,
     ROLE_ADMIN,
     ROLE_NPC,
     ROLE_PLAYER,
@@ -171,9 +174,21 @@ class PermissionEnsurer(discord.Client):
                 CHANNEL_ADMIN_ACTIONS: mod_overwrites(),
                 CHANNEL_FINAL_LEADERBOARD: public_overwrites(),
                 CHANNEL_WINNERS: public_overwrites(),
+                CHANNEL_MANAGE_SUBSCRIPTION: public_overwrites(),
             }
             for name, overwrites in channel_specs.items():
                 await _ensure_channel(guild, name, overwrites)
+
+            subscribe_ch = None
+            for name in SUBSCRIBE_CHANNEL_CANDIDATES:
+                subscribe_ch = _find_channel(guild, name)
+                if subscribe_ch:
+                    break
+            if subscribe_ch:
+                await subscribe_ch.edit(overwrites=public_overwrites(), reason="Stock bot permission verification")
+                print(f"[UPDATE] #{subscribe_ch.name} (subscribe)", flush=True)
+            else:
+                await _ensure_channel(guild, CHANNEL_SUBSCRIBE, public_overwrites())
         await self.close()
 
 
