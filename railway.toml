@@ -1,0 +1,10 @@
+# Deploy from monorepo root (Railpack sees Python via requirements.txt below).
+# Alternative: set service Root Directory to `server` and use /server/railway.toml.
+[build]
+watchPatterns = ["server/**"]
+
+[deploy]
+startCommand = "python server/run.py"
+healthcheckPath = "/api/health"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
