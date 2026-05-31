@@ -1,6 +1,7 @@
-# Deploy from monorepo root (Railpack sees Python via requirements.txt below).
+# Deploy from monorepo root. Railway uses ./Dockerfile when present.
 # Alternative: set service Root Directory to `server` and use /server/railway.toml.
 [build]
+dockerfilePath = "Dockerfile"
 watchPatterns = ["server/**"]
 
 [deploy]

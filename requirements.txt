@@ -1,1 +1,9 @@
--r server/requirements.txt
+# Mirror of server/requirements.txt for Railpack detection at repo root.
+# Prefer Dockerfile build (Railway auto-detects ./Dockerfile).
+aiohttp
+discord.py
+python-dotenv
+requests
+fastapi
+uvicorn[standard]
+pydantic
