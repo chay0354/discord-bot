@@ -24,3 +24,8 @@ stock_bot.sqlite3
 
 .cursor/
 terminals/
+
+crm/node_modules/
+crm/dist/
+crm/.env.local
+server/.env
