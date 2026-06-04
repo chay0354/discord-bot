@@ -17,7 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from database import compute_eligible_winner_ids  # noqa: E402
+from database import (  # noqa: E402
+    compute_eligible_winner_ids,
+    filter_eligible_winners_at_award,
+)
 
 WINNING = {
     "small": {"AAPL"},
@@ -138,6 +141,51 @@ def main() -> int:
     )
     check("wrong ticker excluded", ids == [], str(ids))
     check("wrong picks reason logged", any(r["reason"] == "wrong_picks" for r in ex))
+
+    print("\nScenario 8: NPC early winner blocked if now PLAYER/paid at award")
+    base_ids, base_ex = compute_eligible_winner_ids(
+        winning_tickers=WINNING,
+        vote_rows=rows(
+            (808, "small", "AAPL", "NPC", True),
+            (808, "mid", "MSFT", "NPC", True),
+            (808, "blue", "GOOG", "NPC", True),
+        ),
+        active_winner_user_ids=set(),
+    )
+    check("pre-filter eligible", base_ids == [808], str(base_ids))
+    ids, ex = filter_eligible_winners_at_award(
+        base_ids,
+        base_ex,
+        guild_member_ids={808},
+        player_or_paid_ids={808},
+    )
+    check("now player excluded", ids == [], str(ids))
+    check(
+        "player-at-award reason logged",
+        any(r["reason"] == "now_player_or_paid" for r in ex),
+    )
+
+    print("\nScenario 9: NPC early winner blocked if left guild (ban/leave)")
+    ids, ex = filter_eligible_winners_at_award(
+        base_ids,
+        [],
+        guild_member_ids=set(),
+        player_or_paid_ids=set(),
+    )
+    check("not in guild excluded", ids == [], str(ids))
+    check(
+        "not_in_guild reason logged",
+        any(r["reason"] == "not_in_guild" for r in ex),
+    )
+
+    print("\nScenario 10: NPC still in guild without PLAYER wins at award")
+    ids, _ = filter_eligible_winners_at_award(
+        base_ids,
+        [],
+        guild_member_ids={808},
+        player_or_paid_ids=set(),
+    )
+    check("pure npc still wins", ids == [808], str(ids))
 
     print("\n" + ("=" * 52))
     if failures:

@@ -19,7 +19,7 @@ import discord
 from discord.ext import commands
 
 import database
-from cogs.scheduler import SchedulerCog
+from cogs.scheduler import SchedulerCog, winner_award_filter_sets
 from config import ROLE_WINNER
 
 
@@ -48,14 +48,22 @@ class WinnerRepairBot(commands.Bot):
         expires_at_utc = datetime.now(timezone.utc) + timedelta(days=7)
         expires_at = expires_at_utc.isoformat()
         for guild in self.guilds:
-            winners = database.eligible_winners(guild.id, week_key)
+            member_ids, player_or_paid = winner_award_filter_sets(guild)
+            winners = database.eligible_winners(
+                guild.id,
+                week_key,
+                guild_member_ids=member_ids,
+                player_or_paid_ids=player_or_paid,
+            )
             winner_role = discord.utils.get(guild.roles, name=ROLE_WINNER)
             print(f"{guild.name}: eligible winners for {week_key}: {winners}", flush=True)
             for user_id in winners:
+                member = guild.get_member(user_id)
+                if not member:
+                    continue
                 database.add_winner(guild.id, week_key, user_id, expires_at)
                 if winner_role:
-                    member = guild.get_member(user_id)
-                    if member and winner_role not in member.roles:
+                    if winner_role not in member.roles:
                         try:
                             await member.add_roles(winner_role, reason="Repaired weekly stock game winner")
                         except Exception as exc:

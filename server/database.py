@@ -753,6 +753,44 @@ def compute_eligible_winner_ids(
     return sorted(eligible), exclusions
 
 
+def filter_eligible_winners_at_award(
+    eligible_ids: list[int],
+    exclusions: list[dict[str, Any]],
+    *,
+    guild_member_ids: set[int] | None = None,
+    player_or_paid_ids: set[int] | None = None,
+) -> tuple[list[int], list[dict[str, Any]]]:
+    """Apply Friday-close rules that depend on the member's state *now*, not at vote time.
+
+    - ``not_in_guild``: left the server or was banned (not in ``guild.members``).
+    - ``now_player_or_paid``: became a paying PLAYER after voting as NPC in the early window.
+    """
+    out: list[int] = []
+    extra = list(exclusions)
+    paid = player_or_paid_ids or set()
+    for user_id in eligible_ids:
+        if guild_member_ids is not None and user_id not in guild_member_ids:
+            extra.append(
+                {
+                    "user_id": user_id,
+                    "reason": "not_in_guild",
+                    "detail": "not a guild member at award time (left or banned)",
+                }
+            )
+            continue
+        if user_id in paid:
+            extra.append(
+                {
+                    "user_id": user_id,
+                    "reason": "now_player_or_paid",
+                    "detail": "has PLAYER role or active subscription at award time",
+                }
+            )
+            continue
+        out.append(user_id)
+    return out, extra
+
+
 def expired_winner_grants(
     guild_id: int | None = None,
     now_iso: str | None = None,
@@ -781,27 +819,29 @@ def active_winner_user_ids(guild_id: int, now_iso: str | None = None) -> set[int
     return {int(row["user_id"]) for row in active_winner_grants(guild_id, now_iso)}
 
 
-def eligible_winners(guild_id: int, week_key: str) -> list[int]:
-    winning = winning_tickers_for_week(guild_id, week_key)
-    if not winning:
-        return []
-    rows = _select(
-        "votes",
-        (
-            f"?select=user_id,category,ticker,role_at_vote,is_early"
-            f"&guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
-        ),
+def eligible_winners(
+    guild_id: int,
+    week_key: str,
+    *,
+    guild_member_ids: set[int] | None = None,
+    player_or_paid_ids: set[int] | None = None,
+) -> list[int]:
+    report = eligible_winners_report(
+        guild_id,
+        week_key,
+        guild_member_ids=guild_member_ids,
+        player_or_paid_ids=player_or_paid_ids,
     )
-    active = active_winner_user_ids(guild_id)
-    ids, _ = compute_eligible_winner_ids(
-        winning_tickers=winning,
-        vote_rows=rows,
-        active_winner_user_ids=active,
-    )
-    return ids
+    return list(report.get("eligible_winner_ids") or [])
 
 
-def eligible_winners_report(guild_id: int, week_key: str) -> dict[str, Any]:
+def eligible_winners_report(
+    guild_id: int,
+    week_key: str,
+    *,
+    guild_member_ids: set[int] | None = None,
+    player_or_paid_ids: set[int] | None = None,
+) -> dict[str, Any]:
     """Detailed winner calculation for #mod logs and admin review."""
     winning = winning_tickers_for_week(guild_id, week_key)
     rows = _select(
@@ -825,6 +865,12 @@ def eligible_winners_report(guild_id: int, week_key: str) -> dict[str, Any]:
         winning_tickers=winning,
         vote_rows=rows,
         active_winner_user_ids=active,
+    )
+    ids, exclusions = filter_eligible_winners_at_award(
+        ids,
+        exclusions,
+        guild_member_ids=guild_member_ids,
+        player_or_paid_ids=player_or_paid_ids,
     )
     return {
         "week_key": week_key,

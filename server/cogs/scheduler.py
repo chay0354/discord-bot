@@ -48,6 +48,7 @@ from cogs.weekly_picks import (
     _category_title,
     _delete_bot_messages,
     _purge_channel_messages,
+    _role_snapshot,
     # Voting banner builder (includes live Discord relative timestamp)
     # and the canonical end-of-window calculator
     _build_voting_open_embed,
@@ -260,7 +261,8 @@ def _format_winner_report(report: dict) -> str:
     if exclusions:
         by_reason: dict[str, int] = {}
         for row in exclusions:
-            by_reason[row.get("reason", "?")] = by_reason.get(row.get("reason", "?"), 0) + 1
+            reason = row.get("reason", "?")
+            by_reason[reason] = by_reason.get(reason, 0) + 1
         summary = ", ".join(f"{reason}={count}" for reason, count in sorted(by_reason.items()))
         lines.append(f"**Ineligible vote records:** {summary}")
     note = report.get("note")
@@ -329,6 +331,18 @@ class StepReport:
                 for label, status, detail in self.steps
             ],
         }
+
+
+def winner_award_filter_sets(guild: discord.Guild) -> tuple[set[int], set[int]]:
+    """Member ids in guild, and ids blocked from WINNER award (PLAYER role or paid sub)."""
+    member_ids = {m.id for m in guild.members}
+    player_or_paid: set[int] = set()
+    for member in guild.members:
+        if _role_snapshot(member) == "PLAYER":
+            player_or_paid.add(member.id)
+        elif database.is_paid_member(member.id):
+            player_or_paid.add(member.id)
+    return member_ids, player_or_paid
 
 
 class SchedulerCog(commands.Cog):
@@ -861,7 +875,13 @@ class SchedulerCog(commands.Cog):
             rpt.fail("Expired WINNER roles removed", repr(exc))
 
         # 5) Compute eligible winners (NPC + early-window only) and persist.
-        report = database.eligible_winners_report(guild.id, week_key)
+        member_ids, player_or_paid = winner_award_filter_sets(guild)
+        report = database.eligible_winners_report(
+            guild.id,
+            week_key,
+            guild_member_ids=member_ids,
+            player_or_paid_ids=player_or_paid,
+        )
         winners = list(report.get("eligible_winner_ids") or [])
         try:
             database.save_completed_game(
@@ -896,6 +916,8 @@ class SchedulerCog(commands.Cog):
                 if user_id in active_ids:
                     continue
                 member = guild.get_member(user_id)
+                if not member:
+                    continue
                 if member and winner_role in member.roles:
                     continue
                 try:

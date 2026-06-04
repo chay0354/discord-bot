@@ -36,6 +36,17 @@ Copy `crm/.env.local.example` → `crm/.env.local`, then open `http://localhost:
 
 Vite proxies `/api` to port 8000 when `VITE_API_URL` is empty.
 
+## Documentation (Appendix C)
+
+Full technical handover documentation (install, env, DB schema, webhooks, weekly cycle, backup, security, troubleshooting):
+
+→ **[`server/docs/APPENDIX_C.md`](server/docs/APPENDIX_C.md)**
+
+Additional docs:
+
+- [`server/docs/STRIPE_SUBSCRIPTIONS.md`](server/docs/STRIPE_SUBSCRIPTIONS.md) — billing & webhooks
+- [`server/docs/RESTART_AND_STATE.md`](server/docs/RESTART_AND_STATE.md) — crash recovery
+
 ## Railway (server)
 
 1. New project → deploy from repo, set **root directory** to `server`.
