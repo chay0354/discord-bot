@@ -65,24 +65,41 @@ async def _serve_api() -> None:
 
 
 async def main() -> None:
-    init_db()
     bot = _build_bot()
     app_state.bot = bot
-    await _load_cogs(bot)
-    if not TOKEN:
-        raise RuntimeError("DISCORD_TOKEN is not set")
 
+    # Start the API/health server FIRST so the Railway healthcheck (/api/health)
+    # passes immediately, even if the database or Discord login are temporarily
+    # slow/unavailable. This prevents a crash-loop from killing the deployment.
     print(f"[api] Listening on 0.0.0.0:{API_PORT}", flush=True)
     api_task = asyncio.create_task(_serve_api(), name="crm_api")
+    await asyncio.sleep(0)  # yield so uvicorn can bind the socket
+
+    # DB init must never be fatal to the process; log and continue if it fails
+    # (e.g. Supabase paused). Run off the event loop so it can't block the API.
+    try:
+        await asyncio.to_thread(init_db)
+        print("[db] init_db ok", flush=True)
+    except Exception as exc:
+        print(f"[db] init_db failed (continuing): {exc!r}", flush=True)
+
+    await _load_cogs(bot)
+
+    if not TOKEN:
+        print("[bot] DISCORD_TOKEN not set; serving API only", flush=True)
+        await api_task
+        return
+
     try:
         await bot.start(TOKEN)
+    except Exception as exc:
+        print(f"[bot] Discord client stopped: {exc!r}", flush=True)
     finally:
         app_state.bot_ready = False
-        api_task.cancel()
-        try:
-            await api_task
-        except asyncio.CancelledError:
-            pass
+
+    # Keep the API alive so the deployment stays healthy and logs stay visible
+    # even if the Discord client exits.
+    await api_task
 
 
 if __name__ == "__main__":
