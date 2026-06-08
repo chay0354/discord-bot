@@ -47,8 +47,11 @@ class WinnerRepairBot(commands.Bot):
         week_key = database.week_key_for(datetime.now(timezone.utc))
         expires_at_utc = datetime.now(timezone.utc) + timedelta(days=7)
         expires_at = expires_at_utc.isoformat()
+        week_start_iso = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         for guild in self.guilds:
-            member_ids, player_or_paid = winner_award_filter_sets(guild)
+            member_ids, player_or_paid = await winner_award_filter_sets(
+                guild, week_start_iso=week_start_iso
+            )
             winners = database.eligible_winners(
                 guild.id,
                 week_key,

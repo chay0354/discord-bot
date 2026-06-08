@@ -181,6 +181,17 @@ def main() -> int:
         now_player=True,
     )
 
+    # 8b/9b: became PLAYER mid-week then reverted to NPC before Friday.
+    # winner_award_filter_sets adds these ids via player_grant_user_ids_since,
+    # so they still land in player_or_paid_ids -> excluded.
+    run_row(
+        8.5,
+        "NPC early correct, became PLAYER mid-week then reverted to NPC",
+        full_npc_early,
+        False,
+        now_player=True,  # represents "in player_or_paid_ids" at award time
+    )
+
     # 10 duplicate votes — logic: second vote rejected (no double row)
     print("\nRow 10: duplicate vote blocked (DB 23505 / prior_vote)")
     print("  [PASS] duplicate vote blocked — enforced in record_vote + UI (not double-counted)")

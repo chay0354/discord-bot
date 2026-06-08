@@ -968,12 +968,13 @@ def log_event(guild_id: int | None, event_type: str, details: dict[str, Any]) ->
 _PLAYER_ACTIVE_STATUSES = {"active", "active_until_period_end", "trialing"}
 
 
-def count_player_grants_since(since_iso: str) -> int:
-    """Best-effort count of distinct users who gained PLAYER access since `since_iso`.
+def player_grant_user_ids_since(since_iso: str) -> set[int]:
+    """Distinct Discord IDs who gained PLAYER access at any point since `since_iso`.
 
-    Reads billing audit rows (`stripe_webhook`) and counts unique Discord IDs
-    whose event moved them into an active state. Returns 0 on any error so the
-    weekly report never fails because of this stat.
+    Reads billing audit rows (`stripe_webhook`). This catches a user who became a
+    PLAYER during the week even if they later reverted to NPC — they must not win
+    the weekly competition. Returns an empty set on any error so winner
+    calculation never fails because of this lookup.
     """
     try:
         rows = _select(
@@ -984,8 +985,8 @@ def count_player_grants_since(since_iso: str) -> int:
             ),
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"[audit] count_player_grants_since failed: {exc!r}", flush=True)
-        return 0
+        print(f"[audit] player_grant_user_ids_since failed: {exc!r}", flush=True)
+        return set()
     users: set[int] = set()
     for row in rows:
         details = row.get("details") or {}
@@ -996,7 +997,12 @@ def count_player_grants_since(since_iso: str) -> int:
                 users.add(int(discord_id))
             except (TypeError, ValueError):
                 continue
-    return len(users)
+    return users
+
+
+def count_player_grants_since(since_iso: str) -> int:
+    """Best-effort count of distinct users who gained PLAYER access since `since_iso`."""
+    return len(player_grant_user_ids_since(since_iso))
 
 
 def dump_json(data: Any) -> str:

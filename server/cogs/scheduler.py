@@ -333,8 +333,27 @@ class StepReport:
         }
 
 
-def winner_award_filter_sets(guild: discord.Guild) -> tuple[set[int], set[int]]:
-    """Member ids in guild, and ids blocked from WINNER award (PLAYER role or paid sub)."""
+async def winner_award_filter_sets(
+    guild: discord.Guild,
+    *,
+    week_start_iso: str | None = None,
+) -> tuple[set[int], set[int]]:
+    """Member ids in guild, and ids blocked from WINNER award (PLAYER role or paid sub).
+
+    The membership set drives the ban/leave exclusion (a user who left or was
+    banned is no longer in ``guild.members``). We chunk the guild first so the
+    member cache is complete; otherwise a still-present winner could be missing
+    from the cache and wrongly excluded.
+
+    The blocked set excludes anyone who is a PLAYER / active subscriber **now**,
+    *or* who gained PLAYER access at any point during the week — so an NPC who
+    became a PLAYER mid-week (even if they reverted to NPC) cannot win.
+    """
+    if not guild.chunked:
+        try:
+            await guild.chunk()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[scheduler] guild.chunk() failed for {guild.id}: {exc!r}", flush=True)
     member_ids = {m.id for m in guild.members}
     player_or_paid: set[int] = set()
     for member in guild.members:
@@ -342,6 +361,14 @@ def winner_award_filter_sets(guild: discord.Guild) -> tuple[set[int], set[int]]:
             player_or_paid.add(member.id)
         elif database.is_paid_member(member.id):
             player_or_paid.add(member.id)
+    # Anyone who became a PLAYER during the week is blocked, even if reverted.
+    if week_start_iso:
+        try:
+            player_or_paid |= await asyncio.to_thread(
+                database.player_grant_user_ids_since, week_start_iso
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[scheduler] player_grant lookup failed for {guild.id}: {exc!r}", flush=True)
     return member_ids, player_or_paid
 
 
@@ -875,7 +902,10 @@ class SchedulerCog(commands.Cog):
             rpt.fail("Expired WINNER roles removed", repr(exc))
 
         # 5) Compute eligible winners (NPC + early-window only) and persist.
-        member_ids, player_or_paid = winner_award_filter_sets(guild)
+        week_start_iso = (now_utc - timedelta(days=7)).isoformat()
+        member_ids, player_or_paid = await winner_award_filter_sets(
+            guild, week_start_iso=week_start_iso
+        )
         report = database.eligible_winners_report(
             guild.id,
             week_key,
@@ -1013,7 +1043,6 @@ class SchedulerCog(commands.Cog):
             rpt.fail("live-chosen-tickers reopened and previous closed message cleared", repr(exc))
 
         # 11) PLAYER roles added during the week (best-effort stat).
-        week_start_iso = (now_utc - timedelta(days=7)).isoformat()
         player_added = database.count_player_grants_since(week_start_iso)
         rpt.info("PLAYER roles were added during the week", f"{player_added} user(s)")
 
