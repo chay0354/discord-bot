@@ -8,7 +8,7 @@ from typing import Any
 
 from aiohttp import web
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import database
 from config import (
@@ -318,6 +318,8 @@ class BillingCog(commands.Cog):
     async def cog_load(self) -> None:
         self.bot.add_view(PlayerSubscribeOnlyView(self.bot))
         self.bot.add_view(PlayerManageSubscriptionView(self.bot))
+        if not self._npc_reconcile_loop.is_running():
+            self._npc_reconcile_loop.start()
         settings = StripeSettings()
         api_port = int(os.getenv("PORT", os.getenv("CRM_API_PORT", "8000")))
         webhook_port = int(os.getenv("STRIPE_WEBHOOK_PORT", str(STRIPE_WEBHOOK_PORT)))
@@ -338,6 +340,7 @@ class BillingCog(commands.Cog):
         print(f"[billing] Stripe webhook listening on {STRIPE_WEBHOOK_HOST}:{STRIPE_WEBHOOK_PORT}", flush=True)
 
     async def cog_unload(self) -> None:
+        self._npc_reconcile_loop.cancel()
         if self._runner:
             await self._runner.cleanup()
 
@@ -407,6 +410,49 @@ class BillingCog(commands.Cog):
         except (discord.Forbidden, discord.HTTPException) as exc:
             print(f"[billing] could not add NPC role to {member.id}: {exc!r}", flush=True)
             return False
+
+    @tasks.loop(minutes=5)
+    async def _npc_reconcile_loop(self) -> None:
+        """Safety net: ensure every member has a role even if the join event was
+        missed (e.g. members intent off, downtime, cache miss). Runs on startup
+        and every 5 minutes."""
+        for guild in list(self.bot.guilds):
+            try:
+                await self._reconcile_all_npc(guild)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[billing] NPC reconcile failed for guild {guild.id}: {exc!r}", flush=True)
+
+    @_npc_reconcile_loop.before_loop
+    async def _before_npc_reconcile(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def _reconcile_all_npc(self, guild: discord.Guild) -> int:
+        """Give NPC to every non-bot member that has no PLAYER/WINNER/NPC role.
+        Returns the number of members updated."""
+        try:
+            await guild.chunk()  # ensure the full member list is cached
+        except Exception:
+            pass
+        assigned = 0
+        for member in guild.members:
+            if member.bot:
+                continue
+            existing = {r.name.upper() for r in member.roles}
+            if {ROLE_PLAYER.upper(), ROLE_WINNER.upper(), ROLE_NPC.upper()} & existing:
+                continue
+            # Don't override paid members; promote them to PLAYER instead.
+            try:
+                if database.is_paid_member(member.id):
+                    if await self._set_player_role(member.id, True):
+                        assigned += 1
+                    continue
+            except Exception:
+                pass
+            if await self._ensure_npc_role(member):
+                assigned += 1
+        if assigned:
+            print(f"[billing] NPC reconcile assigned {assigned} role(s) in guild {guild.id}", flush=True)
+        return assigned
 
     async def _mod_log(self, guild: discord.Guild | None, title: str, body: str, color: discord.Color) -> None:
         if not guild:
