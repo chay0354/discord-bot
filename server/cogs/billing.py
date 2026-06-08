@@ -430,9 +430,10 @@ class BillingCog(commands.Cog):
         """Give NPC to every non-bot member that has no PLAYER/WINNER/NPC role.
         Returns the number of members updated."""
         try:
-            await guild.chunk()  # ensure the full member list is cached
+            # chunk() can hang on some gateways; don't let it stall the loop.
+            await asyncio.wait_for(guild.chunk(), timeout=30)
         except Exception:
-            pass
+            pass  # fall back to whatever members are already cached
         assigned = 0
         for member in guild.members:
             if member.bot:

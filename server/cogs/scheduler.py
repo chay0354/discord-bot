@@ -351,7 +351,7 @@ async def winner_award_filter_sets(
     """
     if not guild.chunked:
         try:
-            await guild.chunk()
+            await asyncio.wait_for(guild.chunk(), timeout=30)
         except Exception as exc:  # noqa: BLE001
             print(f"[scheduler] guild.chunk() failed for {guild.id}: {exc!r}", flush=True)
     member_ids = {m.id for m in guild.members}
