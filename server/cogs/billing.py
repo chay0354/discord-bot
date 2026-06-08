@@ -14,7 +14,9 @@ import database
 from config import (
     CHANNEL_MOD,
     MANAGE_SUBSCRIPTION_CHANNEL_CANDIDATES,
+    ROLE_NPC,
     ROLE_PLAYER,
+    ROLE_WINNER,
     SUBSCRIBE_CHANNEL_CANDIDATES,
     STRIPE_WEBHOOK_HOST,
     STRIPE_WEBHOOK_PORT,
@@ -362,16 +364,49 @@ class BillingCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
-        """Re-grant PLAYER if the member already has an active subscription.
+        """Default every new member to NPC, or PLAYER if they already paid.
 
         Covers the case where someone pays before joining the server, or where
-        the member cache missed during the original webhook.
+        the member cache missed during the original webhook. Bots are skipped.
         """
+        if member.bot:
+            return
         try:
             if database.is_paid_member(member.id):
                 await self._set_player_role(member.id, True)
+            else:
+                await self._ensure_npc_role(member)
         except Exception as exc:  # noqa: BLE001
             print(f"[billing] on_member_join reconcile failed for {member.id}: {exc!r}", flush=True)
+
+    async def _ensure_npc_role(self, member: discord.Member) -> bool:
+        """Give a member the NPC role unless they already hold PLAYER/WINNER/NPC."""
+        existing = {r.name.upper() for r in member.roles}
+        if {ROLE_PLAYER.upper(), ROLE_WINNER.upper(), ROLE_NPC.upper()} & existing:
+            return False
+        role = discord.utils.get(member.guild.roles, name=ROLE_NPC)
+        if not role:
+            await self._mod_log(
+                member.guild, "NPC role missing",
+                f"Role `{ROLE_NPC}` not found — cannot auto-assign it to <@{member.id}>.",
+                discord.Color.orange(),
+            )
+            return False
+        me = member.guild.me
+        if me and role >= me.top_role:
+            await self._mod_log(
+                member.guild, "NPC role hierarchy error",
+                f"`{ROLE_NPC}` is above my highest role, so I cannot assign it to "
+                f"<@{member.id}>. Move my bot role above `{ROLE_NPC}` in Server Settings → Roles.",
+                discord.Color.orange(),
+            )
+            return False
+        try:
+            await member.add_roles(role, reason="New member default role")
+            return True
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f"[billing] could not add NPC role to {member.id}: {exc!r}", flush=True)
+            return False
 
     async def _mod_log(self, guild: discord.Guild | None, title: str, body: str, color: discord.Color) -> None:
         if not guild:
