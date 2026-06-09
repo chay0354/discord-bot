@@ -14,6 +14,17 @@ _CACHE_TTL_SECONDS = 45
 _QUOTE_CACHE: dict[str, tuple[float, "FinnhubQuote | None"]] = {}
 _PROFILE_CACHE: dict[str, tuple[float, dict | None]] = {}
 
+# Most recent transport/API failure (network, timeout, 4xx/5xx, rate limit).
+# Lets callers distinguish "ticker does not exist" from "the API call failed".
+_LAST_ERROR: str | None = None
+
+
+def pop_last_error() -> str | None:
+    """Return and clear the most recent Finnhub API failure, if any."""
+    global _LAST_ERROR
+    err, _LAST_ERROR = _LAST_ERROR, None
+    return err
+
 
 @dataclass(frozen=True)
 class FinnhubQuote:
@@ -25,11 +36,18 @@ class FinnhubQuote:
 
 
 def _get(path: str, params: dict[str, str]) -> dict:
+    global _LAST_ERROR
     if not FINNHUB_API_KEY:
+        _LAST_ERROR = "FINNHUB_API_KEY not configured"
         return {}
     merged = {**params, "token": FINNHUB_API_KEY}
-    response = requests.get(f"{FINNHUB_API}/{path}", params=merged, timeout=8)
-    response.raise_for_status()
+    try:
+        response = requests.get(f"{FINNHUB_API}/{path}", params=merged, timeout=8)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        _LAST_ERROR = f"finnhub {path}: {exc!r}"
+        print(f"[finnhub_client] {path} request failed: {exc!r}", flush=True)
+        raise
     return response.json() or {}
 
 

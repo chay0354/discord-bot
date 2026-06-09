@@ -31,7 +31,7 @@ from config import (
     ROLE_PLAYER,
     ROLE_WINNER,
 )
-from cogs.weekly_picks import _vote_limit_for
+from cogs.weekly_picks import _can_vote, _vote_limit_for
 
 
 SUBSCRIBER_ONLY_CHANNELS = (
@@ -42,6 +42,7 @@ SUBSCRIBER_ONLY_CHANNELS = (
     CHANNEL_SMALL_LIVE,
     CHANNEL_MID_LIVE,
     CHANNEL_BLUE_LIVE,
+    "👑𝙑𝙄𝙋-𝗖𝗵𝗮𝘁👑",
 )
 
 
@@ -96,10 +97,16 @@ class GamePermissionVerifier(discord.Client):
                 def __init__(self, role: discord.Role):
                     self.roles = [role]
 
+            class NoRoleMember:
+                roles: list = []
+
             vote_checks = (
                 ("NPC vote limit", _vote_limit_for(FakeMember(npc)), NPC_VOTES_PER_CATEGORY),
                 ("PLAYER vote limit", _vote_limit_for(FakeMember(player)), PLAYER_VOTES_PER_CATEGORY),
                 ("WINNER vote limit", _vote_limit_for(FakeMember(winner)), PLAYER_VOTES_PER_CATEGORY),
+                ("No-role vote limit", _vote_limit_for(NoRoleMember()), 0),
+                ("No-role cannot vote", _can_vote(NoRoleMember()), False),
+                ("NPC can vote", _can_vote(FakeMember(npc)), True),
             )
             for label, actual, expected in vote_checks:
                 if actual == expected:

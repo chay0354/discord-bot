@@ -376,7 +376,7 @@ class BillingCog(commands.Cog):
             return
         try:
             if database.is_paid_member(member.id):
-                await self._set_player_role(member.id, True)
+                await self._set_player_role(member.id, True, reason="paid_member_join")
             else:
                 await self._ensure_npc_role(member)
         except Exception as exc:  # noqa: BLE001
@@ -406,6 +406,11 @@ class BillingCog(commands.Cog):
             return False
         try:
             await member.add_roles(role, reason="New member default role")
+            database.log_event(
+                guild.id,
+                "npc_role_granted",
+                {"discord_id": member.id, "reason": "member_join_auto"},
+            )
             return True
         except (discord.Forbidden, discord.HTTPException) as exc:
             print(f"[billing] could not add NPC role to {member.id}: {exc!r}", flush=True)
@@ -444,7 +449,7 @@ class BillingCog(commands.Cog):
             # Don't override paid members; promote them to PLAYER instead.
             try:
                 if database.is_paid_member(member.id):
-                    if await self._set_player_role(member.id, True):
+                    if await self._set_player_role(member.id, True, reason="npc_reconcile_paid"):
                         assigned += 1
                     continue
             except Exception:
@@ -489,7 +494,13 @@ class BillingCog(commands.Cog):
                 return False
         return False
 
-    async def _set_player_role(self, discord_id: int, active: bool) -> bool:
+    async def _set_player_role(
+        self,
+        discord_id: int,
+        active: bool,
+        *,
+        reason: str = "stripe_subscription",
+    ) -> bool:
         """Add/remove PLAYER role across guilds. Returns True if a change applied.
 
         Role assignment is independent from DMs/emails so a blocked DM can never
@@ -519,11 +530,25 @@ class BillingCog(commands.Cog):
                 continue
             try:
                 if active and role not in member.roles:
-                    await member.add_roles(role, reason="Stripe subscription active")
+                    await member.add_roles(role, reason=reason)
                     changed = True
+                    database.log_event(
+                        guild.id,
+                        "player_role_granted",
+                        {"discord_id": discord_id, "reason": reason},
+                    )
                 elif not active and role in member.roles:
-                    await member.remove_roles(role, reason="Stripe subscription inactive")
+                    await member.remove_roles(role, reason=reason)
                     changed = True
+                    database.log_event(
+                        guild.id,
+                        "player_role_removed",
+                        {
+                            "discord_id": discord_id,
+                            "reason": reason,
+                            "subscription_status": (database.get_subscription(discord_id) or {}).get("status"),
+                        },
+                    )
             except discord.Forbidden:
                 await self._mod_log(
                     guild, "PLAYER role permission error",
@@ -849,7 +874,7 @@ class BillingCog(commands.Cog):
             await ctx.reply(f"No subscription record for {member.mention}.", mention_author=False)
             return
         active = sub.get("status") in ACTIVE_STATUSES
-        await self._set_player_role(member.id, active)
+        await self._set_player_role(member.id, active, reason="admin_resync")
         await ctx.reply(
             f"{member.mention} status `{sub.get('status')}` → PLAYER active `{active}`.",
             mention_author=False,

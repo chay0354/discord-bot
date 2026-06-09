@@ -31,6 +31,7 @@ from config import (
     ROLE_NPC,
     ROLE_PLAYER,
     ROLE_WINNER,
+    RULES_CHANNEL_CANDIDATES,
     SUBSCRIBE_CHANNEL_CANDIDATES,
     TICKER_LIMIT_PER_CATEGORY,
 )
@@ -152,6 +153,12 @@ def arm_early_window(start_utc: datetime) -> None:
         _early_votes[cat].clear()
 
 
+def disarm_early_window() -> None:
+    """Clear the in-memory early-window timer (e.g. after Tuesday 09:00 ET close)."""
+    global _early_window_start_utc
+    _early_window_start_utc = None
+
+
 def restore_early_window(start_utc: datetime) -> None:
     """Restore the early-window start after a restart WITHOUT clearing early-vote
     tracking. The authoritative early-vote flag is persisted per vote (``is_early``
@@ -264,14 +271,32 @@ def _format_et(dt_utc: datetime) -> str:
 
 # ===================== Helpers for leaderboards =====================
 
+def _game_role_names(member: discord.Member) -> set[str]:
+    return {r.name.upper() for r in member.roles}
+
+
+def _can_vote(member: discord.Member) -> bool:
+    """Only members with a game role may vote (NPC / PLAYER / WINNER / ADMIN)."""
+    names = _game_role_names(member)
+    return bool(
+        names
+        & {
+            ROLE_NPC.upper(),
+            ROLE_PLAYER.upper(),
+            ROLE_WINNER.upper(),
+            ROLE_ADMIN.upper(),
+        }
+    )
+
+
 def _vote_limit_for(member: discord.Member) -> int:
-    """PLAYER/WINNER/ADMIN => 5; NPC/default => 1."""
-    names = {r.name.upper() for r in member.roles}
+    """PLAYER/WINNER/ADMIN => 5; NPC => 1; no game role => 0 (blocked by _can_vote)."""
+    names = _game_role_names(member)
     if ROLE_PLAYER.upper() in names or ROLE_WINNER.upper() in names or ROLE_ADMIN.upper() in names:
         return PLAYER_VOTES_PER_CATEGORY
     if ROLE_NPC.upper() in names:
         return NPC_VOTES_PER_CATEGORY
-    return NPC_VOTES_PER_CATEGORY
+    return 0
 
 
 def _role_snapshot(member: discord.Member) -> str:
@@ -416,6 +441,59 @@ def _leaderboard_embed(
     return emb
 
 
+def _message_state_key(kind: str, cat: int | None = None) -> str:
+    return f"{kind}:{cat}" if cat is not None else kind
+
+
+def _persist_message_state(
+    guild_id: int,
+    key: str,
+    *,
+    channel_id: int | None,
+    message_id: int | None,
+    payload: dict | None = None,
+) -> None:
+    try:
+        database.save_message_state(
+            guild_id,
+            key,
+            channel_id=channel_id,
+            message_id=message_id,
+            payload=payload,
+        )
+    except Exception as exc:
+        print(f"[weekly_picks] save_message_state({key}) failed: {exc!r}", flush=True)
+
+
+def _restore_message_ids_from_db(guild_id: int) -> None:
+    """Load persisted Discord message IDs so edits target the right messages after restart."""
+    try:
+        rows = database.list_message_states(guild_id)
+    except Exception as exc:
+        print(f"[weekly_picks] list_message_states failed for {guild_id}: {exc!r}", flush=True)
+        return
+    for row in rows:
+        key = str(row.get("key") or "")
+        msg_id = row.get("message_id")
+        if not msg_id:
+            continue
+        try:
+            mid = int(msg_id)
+        except (TypeError, ValueError):
+            continue
+        if key.startswith("live_leaderboard:"):
+            try:
+                _live_msg_ids[int(key.split(":", 1)[1])] = mid
+            except (IndexError, ValueError):
+                pass
+        elif key.startswith("voting_open:"):
+            try:
+                cat = int(key.split(":", 1)[1])
+                _voting_open_msg_ids.setdefault(guild_id, {})[cat] = mid
+            except (IndexError, ValueError):
+                pass
+
+
 def _schedule_leaderboard_update(guild: discord.Guild, cat: int) -> None:
     """Debounced live leaderboard refresh so votes confirm instantly."""
     key = (guild.id, cat)
@@ -448,10 +526,19 @@ async def _post_or_update_leaderboard(guild: discord.Guild, cat: int) -> None:
     emb = _leaderboard_embed(cat, pairs, quotes, names)
     # edit existing if we have id
     msg_id = _live_msg_ids.get(cat)
+    state_key = _message_state_key("live_leaderboard", cat)
     if msg_id:
         try:
             msg = await ch.fetch_message(msg_id)
             await msg.edit(embed=emb)
+            await asyncio.to_thread(
+                _persist_message_state,
+                guild.id,
+                state_key,
+                channel_id=ch.id,
+                message_id=msg.id,
+                payload={"week_key": week_key},
+            )
             return
         except Exception:
             pass  # fall through to send new
@@ -464,12 +551,28 @@ async def _post_or_update_leaderboard(guild: discord.Guild, cat: int) -> None:
                 if (e.title or "").startswith("🏆 LIVE LEADERBOARD —"):
                     await msg.edit(embed=emb)
                     _live_msg_ids[cat] = msg.id
+                    await asyncio.to_thread(
+                        _persist_message_state,
+                        guild.id,
+                        state_key,
+                        channel_id=ch.id,
+                        message_id=msg.id,
+                        payload={"week_key": week_key},
+                    )
                     return
     except Exception:
         pass
 
     sent = await ch.send(embed=emb)
     _live_msg_ids[cat] = sent.id
+    await asyncio.to_thread(
+        _persist_message_state,
+        guild.id,
+        state_key,
+        channel_id=ch.id,
+        message_id=sent.id,
+        payload={"week_key": week_key},
+    )
 
 
 # ===================== Pick-Results helpers (local copy) =====================
@@ -690,6 +793,18 @@ class WeeklyVotingView(discord.ui.View):
         category_key = ["small", "mid", "blue"][cat]
         week_key = database.week_key_for()
         member: discord.Member = interaction.user
+        if not _can_vote(member):
+            rules_mention = _channel_mention_or_text(
+                guild,
+                list(RULES_CHANNEL_CANDIDATES),
+                "#rules",
+            )
+            await interaction.followup.send(
+                "You need a game role before you can vote. "
+                f"React in {rules_mention} to receive the NPC role, or subscribe to become a PLAYER.",
+                ephemeral=True,
+            )
+            return
         limit = _vote_limit_for(member)
         role_at_vote = _role_snapshot(member)
         ticker = ticker.upper().strip().lstrip("$")
@@ -733,8 +848,7 @@ class WeeklyVotingView(discord.ui.View):
                 "#subscribe",
             )
             await interaction.followup.send(
-                f"YOU HAVE PICKED ${ticker}\n"
-                f"YOU HAVE 1/{limit} PICKS\n"
+                f"{_vote_confirmation_message(ticker, cat, 1, limit)}\n"
                 f"Join {reg_mention} to get 5 weekly votes and see live results in real time.",
                 ephemeral=True,
             )
@@ -765,7 +879,7 @@ class WeeklyVotingView(discord.ui.View):
 
         new_count = mem_count + 1
         await interaction.followup.send(
-            f"YOU HAVE PICKED ${ticker}\nYOU HAVE {new_count}/{limit} PICKS",
+            _vote_confirmation_message(ticker, cat, new_count, limit),
             ephemeral=True,
         )
         user_set.add(ticker)
@@ -885,15 +999,32 @@ def _open_picker_embed() -> discord.Embed:
 
 # ===================== Banner helpers =====================
 
-def _banner_description_with_timer(cat: int, end_utc: Optional[datetime]) -> str:
+def _vote_confirmation_message(ticker: str, cat: int, count: int, limit: int) -> str:
+    return (
+        f"YOU HAVE PICKED ${ticker} in **{_category_title(cat)}**\n"
+        f"YOU HAVE {count}/{limit} PICKS"
+    )
+
+
+def _banner_description_with_timer(
+    cat: int,
+    end_utc: Optional[datetime],
+    guild: discord.Guild | None = None,
+) -> str:
     live_ch = _category_idx_to_live_name(cat)
+    live_mention = (
+        _channel_mention_or_text(guild, [live_ch], f"#{live_ch}")
+        if guild
+        else f"#{live_ch}"
+    )
     base = (
         f"This week’s **{_category_title(cat)}** game is in the **vote stage**.\n\n"
         "**What to do:** press a **button below** to vote for that stock. "
         "Each button shows the ticker and its current price.\n\n"
-        f"**Live leaderboard:** #{live_ch}\n"
+        f"**Live leaderboard:** {live_mention}\n"
         "• **NPC** — 1 vote in this category\n"
-        "• **PLAYER / WINNER** — up to 5 votes (different tickers)"
+        "• **PLAYER / WINNER** — up to 5 votes (different tickers)\n\n"
+        "**Voting closes:** Friday at **4:00 PM ET** (market close)."
     )
     if end_utc is None:
         return base
@@ -905,11 +1036,15 @@ def _banner_description_with_timer(cat: int, end_utc: Optional[datetime]) -> str
     )
 
 
-def _build_voting_open_embed(cat: int, end_utc: Optional[datetime]) -> discord.Embed:
+def _build_voting_open_embed(
+    cat: int,
+    end_utc: Optional[datetime],
+    guild: discord.Guild | None = None,
+) -> discord.Embed:
     color = _ROSTER_COLORS[cat] if cat < len(_ROSTER_COLORS) else discord.Color.blue()
     emb = discord.Embed(
         title="VOTING OPEN",
-        description=_banner_description_with_timer(cat, end_utc),
+        description=_banner_description_with_timer(cat, end_utc, guild=guild),
         color=color,
     )
     emb.set_author(name=_category_title(cat))
@@ -1026,6 +1161,7 @@ class WeeklyPicksCog(commands.Cog):
         self._recovered = True
         week_key = database.week_key_for()
         for guild in self.bot.guilds:
+            await asyncio.to_thread(_restore_message_ids_from_db, guild.id)
             try:
                 cycle = await asyncio.to_thread(database.ensure_cycle, guild.id, week_key)
             except Exception as exc:
@@ -1064,6 +1200,8 @@ class WeeklyPicksCog(commands.Cog):
                 print(f"[weekly_picks] recovery: view re-register failed for {guild.id}: {exc!r}", flush=True)
 
     def _restore_early_window_from_cycle(self, cycle: dict) -> None:
+        if not bool(cycle.get("early_window_open")):
+            return
         start_raw = cycle.get("monday_open_at")
         end_raw = cycle.get("early_window_end_at")
         start_dt: Optional[datetime] = None
@@ -1214,15 +1352,22 @@ class WeeklyPicksCog(commands.Cog):
                 counts[t] = counts.get(t, 0)
 
             # Build view + VOTING OPEN banner + roster card (names & prices)
-            banner = _build_voting_open_embed(cat, end_utc)
+            banner = _build_voting_open_embed(cat, end_utc, guild=ctx.guild)
             view = await build_weekly_voting_view(cat, tickers)
 
             try:
                 # Clean old bot messages first so only the new banner remains
                 await _delete_bot_messages(ch, ctx.guild, limit=400)
                 sent = await ch.send(embed=banner, view=view)
-                _voting_open_msg_ids.setdefault(
-                    ctx.guild.id, {})[cat] = sent.id
+                _voting_open_msg_ids.setdefault(ctx.guild.id, {})[cat] = sent.id
+                await asyncio.to_thread(
+                    _persist_message_state,
+                    ctx.guild.id,
+                    _message_state_key("voting_open", cat),
+                    channel_id=ch.id,
+                    message_id=sent.id,
+                    payload={"week_key": week_key},
+                )
                 updated += 1
             except Exception as e:
                 await ctx.send(f"Failed to enable voting in **#{ch_name}**: {e}")

@@ -39,6 +39,7 @@ from config import (
 # Early-window state + voting UI + leaderboards + helpers
 from cogs.weekly_picks import (
     arm_early_window,
+    disarm_early_window,
     restore_early_window,
     is_early_window_active,
     build_weekly_voting_view,
@@ -52,6 +53,8 @@ from cogs.weekly_picks import (
     # Voting banner builder (includes live Discord relative timestamp)
     # and the canonical end-of-window calculator
     _build_voting_open_embed,
+    _message_state_key,
+    _persist_message_state,
     early_window_end_utc,
 )
 
@@ -186,6 +189,14 @@ def _next_weekday_time_et(dt_utc: datetime, weekday: int, hour: int, minute: int
     if target_utc <= dt_utc:
         target_utc = _from_et_local_to_utc(local_target + timedelta(days=7))
     return target_utc
+
+
+def _friday_4pm_et_for_week(dt_utc: datetime) -> datetime:
+    """Return this ISO week's Friday 16:00 ET as a UTC-aware datetime."""
+    now_et = _to_et(dt_utc)
+    monday_date = (now_et - timedelta(days=now_et.weekday())).date()
+    friday_date = monday_date + timedelta(days=4)
+    return _from_et_local_to_utc(datetime.combine(friday_date, dtime(16, 0)))
 
 
 # --- Local helpers ---
@@ -434,9 +445,13 @@ class SchedulerCog(commands.Cog):
         except Exception as exc:
             rpt.fail("Expired WINNER roles removed", repr(exc))
 
-        # 1) Arm Early Window (start now) + set phase.
-        arm_early_window(now_utc)
-        end_utc = early_window_end_utc()
+        # 1) Arm Early Window — anchored to Monday 09:00 ET → Tuesday 09:00 ET (spec).
+        start_utc = _monday_9am_et_for_week(now_utc)
+        start_et = _to_et(start_utc)
+        end_utc = _from_et_local_to_utc(
+            datetime.combine(start_et.date() + timedelta(days=1), dtime(9, 0))
+        )
+        arm_early_window(start_utc)
         try:
             database.set_cycle_phase(
                 guild.id,
@@ -445,8 +460,8 @@ class SchedulerCog(commands.Cog):
                 ticker_selection_open=False,
                 voting_open=True,
                 early_window_open=True,
-                monday_open_at=now_utc.isoformat(),
-                early_window_end_at=end_utc.isoformat() if end_utc else None,
+                monday_open_at=start_utc.isoformat(),
+                early_window_end_at=end_utc.isoformat(),
             )
             rpt.ok(
                 "Voting window opened (24h early window armed)",
@@ -471,10 +486,22 @@ class SchedulerCog(commands.Cog):
         except Exception:
             pass
         total_moved = sum(len(lists[i]) for i in range(3))
+
+        def _fmt_tickers(symbols: List[str]) -> str:
+            if not symbols:
+                return "none"
+            shown = ", ".join(f"${s}" for s in symbols[:15])
+            if len(symbols) > 15:
+                shown += f", +{len(symbols) - 15} more"
+            return shown
+
         rpt.info(
-            "Tickers moved from weekend selection to WEEKLY PICKS",
-            f"{total_moved} ticker(s) — "
-            + " • ".join(f"{_category_title(i)}: {len(lists[i])}" for i in range(3)),
+            "Tickers carried over from weekend selection to WEEKLY PICKS",
+            f"{total_moved} ticker(s)\n"
+            + "\n".join(
+                f"• {_category_title(i)} ({len(lists[i])}): {_fmt_tickers(lists[i])}"
+                for i in range(3)
+            ),
         )
 
         # 3) Push to WEEKLY channels (clear old messages, post VOTING OPEN + buttons).
@@ -483,6 +510,7 @@ class SchedulerCog(commands.Cog):
         per_cat_counts: List[int] = [0, 0, 0]
         weekly_found = 0
         leaderboards_ok = 0
+        opened_mentions: List[str] = []
         for cat in range(3):
             ch_name = _category_idx_to_weekly_name(cat)
             ch = _find_text_channel(guild, ch_name)
@@ -499,7 +527,7 @@ class SchedulerCog(commands.Cog):
             except Exception:
                 pass
 
-            banner = _build_voting_open_embed(cat, end_utc)
+            banner = _build_voting_open_embed(cat, end_utc, guild=guild)
             if not tickers:
                 original = banner.description or ""
                 parts = original.split("\n\n", 1)
@@ -507,9 +535,21 @@ class SchedulerCog(commands.Cog):
                 banner.description = f"**NO TICKERS SELECTED THIS WEEK**\n\n{tail}"
 
             view = await build_weekly_voting_view(cat, tickers) if tickers else None
+            if view is not None:
+                # Register persistent handlers so vote buttons keep working after restart.
+                self.bot.add_view(view)
             try:
-                await ch.send(embed=banner, view=view)
+                sent = await ch.send(embed=banner, view=view)
+                await asyncio.to_thread(
+                    _persist_message_state,
+                    guild.id,
+                    _message_state_key("voting_open", cat),
+                    channel_id=ch.id,
+                    message_id=sent.id,
+                    payload={"week_key": week_key},
+                )
                 updated += 1
+                opened_mentions.append(ch.mention)
             except Exception:
                 continue
 
@@ -522,7 +562,8 @@ class SchedulerCog(commands.Cog):
         rpt.check(
             "WEEKLY PICKS channels opened with VOTING OPEN + buttons",
             updated == 3,
-            f"{updated}/3 channels" + ("" if weekly_found == 3 else f" ({weekly_found} found)"),
+            (", ".join(opened_mentions) if opened_mentions else f"{updated}/3 channels")
+            + ("" if weekly_found == 3 else f" ({weekly_found} found)"),
         )
         rpt.check(
             "Previous WEEKLY PICKS messages removed",
@@ -581,6 +622,12 @@ class SchedulerCog(commands.Cog):
                 "week_key": week_key,
                 "per_category_counts": per_cat_counts,
                 "tickers_moved": total_moved,
+                "tickers_by_category": {
+                    "small": lists[0],
+                    "mid": lists[1],
+                    "blue": lists[2],
+                },
+                "channels_opened": opened_mentions,
                 "report": rpt.summary_dict(),
             },
         )
@@ -610,6 +657,7 @@ class SchedulerCog(commands.Cog):
             voting_open=True,
             early_window_open=False,
         )
+        disarm_early_window()
         await self._announce_mod(
             guild,
             "Early Winner Window Closed",
@@ -750,6 +798,16 @@ class SchedulerCog(commands.Cog):
                 try:
                     await member.remove_roles(role, reason="WINNER role expired")
                     removed += 1
+                    database.log_event(
+                        guild.id,
+                        "winner_role_removed",
+                        {
+                            "discord_id": user_id,
+                            "week_key": row.get("week_key"),
+                            "reason": "expired",
+                            "expires_at": row.get("expires_at"),
+                        },
+                    )
                     try:
                         await member.send(_winner_role_removed_dm(player_mention))
                     except Exception:
@@ -840,9 +898,17 @@ class SchedulerCog(commands.Cog):
             rpt.fail("WEEKLY PICKS voting closed successfully", repr(exc))
 
         # 2) Purge WEEKLY PICKS channels (removes buttons) + post VOTING CLOSED.
+        leaderboard_ch = _find_text_channel(guild, CHANNEL_FINAL_LEADERBOARD)
+        leaderboard_mention = (
+            leaderboard_ch.mention
+            if leaderboard_ch
+            else f"#{CHANNEL_FINAL_LEADERBOARD}"
+        )
         closed = discord.Embed(
             title="VOTING CLOSED",
             description=(
+                "Voting has ended for this week. "
+                f"Final results are posted in {leaderboard_mention}.\n\n"
                 "Voting will resume **Monday at 9 AM EST**.\n"
                 "CHOOSE YOUR TICKER is now open for PLAYER and WINNER roles."
             ),
@@ -977,7 +1043,14 @@ class SchedulerCog(commands.Cog):
                 if not member:
                     continue
                 try:
-                    database.add_winner(guild.id, week_key, user_id, expires_at)
+                    database.add_winner(
+                        guild.id,
+                        week_key,
+                        user_id,
+                        expires_at,
+                        reason="npc_early_vote_all_categories",
+                        winning_tickers=report.get("winning_tickers") or {},
+                    )
                 except Exception:
                     grant_errors += 1
                     continue
@@ -985,6 +1058,16 @@ class SchedulerCog(commands.Cog):
                 try:
                     await member.add_roles(winner_role, reason="Weekly stock game winner")
                     granted += 1
+                    database.log_event(
+                        guild.id,
+                        "winner_role_granted",
+                        {
+                            "discord_id": user_id,
+                            "week_key": week_key,
+                            "reason": "weekly_winner",
+                            "expires_at": expires_at,
+                        },
+                    )
                     try:
                         await member.send(_winner_role_dm(now_utc + timedelta(days=7)))
                     except Exception as dm_exc:
@@ -1095,52 +1178,134 @@ class SchedulerCog(commands.Cog):
             except Exception as e:
                 await self._announce_mod(guild, "Friday Close — Error", repr(e), discord.Color.red())
 
-    async def _bootstrap_if_inside_window(self):
-        """
-        If bot starts within [Mon 09:00 ET, Tue 09:00 ET) run the Monday-open flow
-        only if it has NOT already happened for this week. After a restart the
-        in-memory early window is gone, so we consult the DB cycle first and
-        re-arm it instead of re-running Monday-open (which would wipe the active
-        voting channels). This makes restarts safe and idempotent.
+    async def _reconcile_missed_events_one_guild(self, guild: discord.Guild) -> None:
+        """Run any scheduled phase transition that was missed while the bot was offline.
+
+        Order matters: Friday close ends the week; Monday open starts voting; Tuesday
+        close ends the early window. Each step re-reads ``game_cycles`` when needed.
         """
         now_utc = _now_utc()
-        this_mon_9_utc = _monday_9am_et_for_week(now_utc)
-        tue_9_utc = this_mon_9_utc + timedelta(days=1)
-        if not (this_mon_9_utc <= now_utc < tue_9_utc):
+        week_key = database.week_key_for(now_utc)
+        try:
+            cycle = await asyncio.to_thread(database.ensure_cycle, guild.id, week_key)
+        except Exception as exc:
+            print(f"[scheduler] reconcile: cannot load cycle for {guild.id}: {exc!r}", flush=True)
             return
 
-        week_key = database.week_key_for(now_utc)
-        already_open = False
-        for guild in list(self.bot.guilds):
+        mon_9 = _monday_9am_et_for_week(now_utc)
+        tue_9 = mon_9 + timedelta(days=1)
+        fri_4 = _friday_4pm_et_for_week(now_utc)
+
+        voting_open = bool(cycle.get("voting_open"))
+        early_open = bool(cycle.get("early_window_open"))
+        status = str(cycle.get("status") or "")
+
+        # 1) Missed Friday close — voting still open after market close.
+        if now_utc >= fri_4 and voting_open and status != "closed":
+            print(
+                f"[scheduler] reconcile: missed Friday close for guild {guild.id} week {week_key}",
+                flush=True,
+            )
+            await self._announce_mod(
+                guild,
+                "Scheduler Catch-Up — Friday Close",
+                (
+                    f"Bot was offline when voting should have closed for **{week_key}**. "
+                    f"Running Friday close now ({_format_et(now_utc)})."
+                ),
+                discord.Color.orange(),
+            )
+            database.log_event(
+                guild.id,
+                "missed_friday_close_catchup",
+                {"week_key": week_key, "at": now_utc.isoformat()},
+            )
+            await self._friday_close_one_guild(guild)
+            return
+
+        # 2) Missed Monday open — still the same trading week (before Friday close).
+        if now_utc >= mon_9 and now_utc < fri_4 and not voting_open and status != "closed":
+            print(
+                f"[scheduler] reconcile: missed Monday open for guild {guild.id} week {week_key}",
+                flush=True,
+            )
+            await self._announce_mod(
+                guild,
+                "Scheduler Catch-Up — Monday Open",
+                (
+                    f"Bot was offline when voting should have opened for **{week_key}**. "
+                    f"Running Monday open now ({_format_et(now_utc)})."
+                ),
+                discord.Color.orange(),
+            )
+            database.log_event(
+                guild.id,
+                "missed_monday_open_catchup",
+                {"week_key": week_key, "at": now_utc.isoformat()},
+            )
+            await self._monday_open_one_guild(guild)
             try:
                 cycle = await asyncio.to_thread(database.ensure_cycle, guild.id, week_key)
             except Exception:
-                continue
-            if bool(cycle.get("voting_open")) and cycle.get("monday_open_at"):
-                already_open = True
-                # Re-arm the in-memory early window from persisted state.
-                start_raw = cycle.get("monday_open_at")
-                try:
-                    start_dt = datetime.fromisoformat(str(start_raw))
-                    if start_dt.tzinfo is None:
-                        start_dt = start_dt.replace(tzinfo=UTC)
-                    if now_utc < start_dt + timedelta(hours=24):
-                        restore_early_window(start_dt)
-                except Exception:
-                    pass
+                return
+            voting_open = bool(cycle.get("voting_open"))
+            early_open = bool(cycle.get("early_window_open"))
 
-        if already_open or is_early_window_active(now_utc):
-            return
-        await self._monday_open_all_guilds()
+        # 3) Re-arm in-memory early window when DB says it is still open.
+        if voting_open and early_open and cycle.get("monday_open_at"):
+            start_raw = cycle.get("monday_open_at")
+            try:
+                start_dt = datetime.fromisoformat(str(start_raw))
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=UTC)
+                if now_utc < start_dt + timedelta(hours=24):
+                    restore_early_window(start_dt)
+            except Exception:
+                pass
+
+        # 4) Missed Tuesday early-window close.
+        if now_utc >= tue_9 and now_utc < fri_4 and voting_open and early_open:
+            print(
+                f"[scheduler] reconcile: missed early-window close for guild {guild.id} week {week_key}",
+                flush=True,
+            )
+            await self._announce_mod(
+                guild,
+                "Scheduler Catch-Up — Early Window Close",
+                (
+                    f"Bot was offline when the 24h early-vote window should have ended "
+                    f"for **{week_key}**. Closing it now ({_format_et(now_utc)})."
+                ),
+                discord.Color.orange(),
+            )
+            database.log_event(
+                guild.id,
+                "missed_early_close_catchup",
+                {"week_key": week_key, "at": now_utc.isoformat()},
+            )
+            await self._tuesday_early_close_one_guild(guild)
+
+    async def _reconcile_missed_events_all_guilds(self) -> None:
+        for guild in list(self.bot.guilds):
+            try:
+                await self._reconcile_missed_events_one_guild(guild)
+            except Exception as exc:
+                print(f"[scheduler] reconcile failed for {guild.id}: {exc!r}", flush=True)
+                await self._announce_mod(
+                    guild,
+                    "Scheduler Catch-Up — Error",
+                    f"Missed-event reconciliation failed: {exc!r}",
+                    discord.Color.red(),
+                )
 
     async def _runner(self):
         await self.bot.wait_until_ready()
 
-        # If we're already inside the window on startup, run now.
+        # Catch up any open/close the bot missed while offline.
         try:
-            await self._bootstrap_if_inside_window()
+            await self._reconcile_missed_events_all_guilds()
         except Exception as e:
-            print(f"[scheduler] bootstrap check error: {e!r}")
+            print(f"[scheduler] reconcile check error: {e!r}")
 
         while not self.bot.is_closed():
             now_utc = _now_utc()

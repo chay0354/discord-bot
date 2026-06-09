@@ -23,7 +23,10 @@ from config import (
     TICKER_CHANNEL_BY_CATEGORY,
     TICKER_LIMIT_PER_CATEGORY,
 )
-from services.finnhub_client import resolve_symbol as finnhub_resolve_symbol
+from services.finnhub_client import (
+    resolve_symbol as finnhub_resolve_symbol,
+    pop_last_error as finnhub_pop_last_error,
+)
 from services.yahoo_client import (
     category_for_channel,
     resolve_symbol as yahoo_resolve_symbol,
@@ -184,10 +187,35 @@ def _pick_results_embed_scaffold() -> discord.Embed:
     return emb
 
 
+def _persist_pick_results_state(guild_id: int, channel_id: int, message_id: int) -> None:
+    try:
+        database.save_message_state(
+            guild_id,
+            "pick_results",
+            channel_id=channel_id,
+            message_id=message_id,
+            payload={"kind": "pick_results"},
+        )
+    except Exception as exc:
+        print(f"[submission_ui] save_message_state(pick_results) failed: {exc!r}", flush=True)
+
+
+def _load_pick_results_msg_id_from_db(guild_id: int) -> None:
+    if guild_id in _pick_results_msg_id:
+        return
+    try:
+        row = database.get_message_state(guild_id, "pick_results")
+        if row and row.get("message_id"):
+            _pick_results_msg_id[guild_id] = int(row["message_id"])
+    except Exception:
+        pass
+
+
 async def _ensure_pick_results_message(guild: discord.Guild) -> tuple[discord.Message, discord.Embed] | None:
     pr_ch = await _get_pick_results_channel(guild)
     if pr_ch is None:
         return None
+    _load_pick_results_msg_id_from_db(guild.id)
     cached_id = _pick_results_msg_id.get(guild.id)
     if cached_id:
         try:
@@ -199,9 +227,11 @@ async def _ensure_pick_results_message(guild: discord.Guild) -> tuple[discord.Me
     found = await _find_pick_results_message(pr_ch)
     if found:
         _pick_results_msg_id[guild.id] = found[0].id
+        _persist_pick_results_state(guild.id, pr_ch.id, found[0].id)
         return found
     msg = await pr_ch.send(embed=_pick_results_embed_scaffold())
     _pick_results_msg_id[guild.id] = msg.id
+    _persist_pick_results_state(guild.id, pr_ch.id, msg.id)
     return msg, msg.embeds[0]
 
 
@@ -387,6 +417,32 @@ async def _post_mod_log_submission_closed(
             f"Triggered by: {who}"
         ),
         color=discord.Color.red()
+    )
+    try:
+        await mod.send(embed=emb)
+    except Exception:
+        pass
+
+
+async def _post_mod_log_market_api_error(
+    guild: discord.Guild,
+    symbol: str,
+    ch: discord.TextChannel,
+    member: discord.Member | None,
+):
+    """Surface a Finnhub (market-data) API failure to #mod so admins see WHAT failed."""
+    mod = _find_text_channel(guild, "mod")
+    if not mod:
+        return
+    who = member.mention if member else "a user"
+    emb = discord.Embed(
+        title="Market Data API Error (Finnhub)",
+        description=(
+            f"Could not verify **${symbol}** for {who} in {ch.mention}.\n"
+            "Finnhub did not respond (network/timeout/rate-limit). The user was asked "
+            "to retry; no invalid ticker was accepted."
+        ),
+        color=discord.Color.red(),
     )
     try:
         await mod.send(embed=emb)
@@ -600,8 +656,29 @@ class StockPickerView(discord.ui.View):
         if not q:
             return "not_found", q, None
 
+        finnhub_pop_last_error()  # clear any stale error before this lookup
         row = resolve_ticker_any(q)
         if not row:
+            # Distinguish a genuine "no such ticker" from a Finnhub API failure
+            # (network/timeout/rate-limit/5xx) so admins see WHAT failed.
+            api_error = finnhub_pop_last_error()
+            if api_error:
+                guild = self.channel.guild
+                try:
+                    database.log_event(
+                        guild.id if guild else None,
+                        "market_data_api_error",
+                        {
+                            "source": "finnhub",
+                            "stage": "ticker_selection",
+                            "symbol": q,
+                            "channel": self.channel.name,
+                            "error": api_error,
+                        },
+                    )
+                except Exception:
+                    pass
+                return "api_error", q, None
             return "not_found", q, None
         if not row.get("exchange_ok"):
             return "bad_exchange", q, row
@@ -624,6 +701,12 @@ class StockPickerView(discord.ui.View):
 
     def _rejection_message(self, status: str, symbol: str, row: dict | None) -> str:
         sym = f"${symbol}" if symbol else "that symbol"
+        if status == "api_error":
+            return (
+                f"Couldn’t reach the market-data service to verify **{sym}** right now. "
+                "This is a temporary issue on our side — please try again in a moment. "
+                "(An admin has been notified.)"
+            )
         if status == "not_found":
             return (
                 f"**{sym}** isn’t a recognized stock symbol. "
@@ -671,6 +754,15 @@ class StockPickerView(discord.ui.View):
         try:
             status, ticker, market_row = await asyncio.to_thread(self._resolve_ticker, query)
             if status != "ok":
+                if status == "api_error":
+                    await _post_mod_log_market_api_error(
+                        guild=interaction.guild,
+                        symbol=ticker,
+                        ch=self.channel,
+                        member=interaction.user
+                        if isinstance(interaction.user, discord.Member)
+                        else None,
+                    )
                 await status_msg.edit(content=self._rejection_message(status, ticker, market_row))
                 return
 
@@ -693,10 +785,21 @@ class StockPickerView(discord.ui.View):
                         )
                     )
                     return
-                if reason in {"duplicate", "user_already_picked"}:
+                if reason == "user_already_picked":
+                    await status_msg.edit(
+                        content="You already submitted a ticker for this category."
+                    )
+                    return
+                if reason == "duplicate":
+                    await status_msg.edit(
+                        content=f"**${ticker.upper()}** is already in this category's list. Pick a different ticker."
+                    )
+                    return
+                if reason == "closed":
                     await status_msg.edit(
                         content=(
-                            "That ticker is already listed, or you already submitted for this category."
+                            "Ticker selection is closed right now. "
+                            "CHOOSE YOUR TICKER reopens after Friday market close."
                         )
                     )
                     return
@@ -830,6 +933,14 @@ class OpenPickerView(discord.ui.View):
         if not _can_choose_weekly_ticker(member):
             await interaction.response.send_message(
                 "Only PLAYER subscribers, active WINNERS, and admins can choose weekly tickers.",
+                ephemeral=True,
+            )
+            return
+
+        if await _is_channel_closed(channel):
+            await interaction.response.send_message(
+                f"This category already has {TICKER_LIMIT_PER_CATEGORY} unique tickers "
+                "and is **closed for this week**.",
                 ephemeral=True,
             )
             return

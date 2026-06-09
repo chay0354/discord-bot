@@ -8,6 +8,7 @@ from __future__ import annotations
 import discord
 from discord.ext import commands
 
+import database
 from config import (
     CHANNEL_MOD,
     CHANNEL_RULES,
@@ -127,6 +128,11 @@ class OnboardingCog(commands.Cog):
             return
         try:
             await member.add_roles(role, reason="Rules channel gate reaction")
+            database.log_event(
+                guild.id,
+                "npc_role_granted",
+                {"discord_id": member.id, "reason": "rules_gate_reaction"},
+            )
             print(f"[onboarding] granted NPC to {member.id} in {guild.id}", flush=True)
         except (discord.Forbidden, discord.HTTPException) as exc:
             print(f"[onboarding] could not grant NPC to {member.id}: {exc!r}", flush=True)

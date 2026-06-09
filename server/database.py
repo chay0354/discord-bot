@@ -881,21 +881,53 @@ def eligible_winners_report(
     }
 
 
-def add_winner(guild_id: int, week_key: str, user_id: int, expires_at: str) -> None:
+def add_winner(
+    guild_id: int,
+    week_key: str,
+    user_id: int,
+    expires_at: str,
+    *,
+    reason: str | None = None,
+    winning_tickers: dict[str, Any] | None = None,
+) -> None:
     upsert_user(user_id)
-    _request(
-        "POST",
-        "winners",
-        query="?on_conflict=guild_id,week_key,user_id",
-        json_body={
-            "guild_id": guild_id,
-            "week_key": week_key,
-            "user_id": user_id,
-            "awarded_at": utc_now_iso(),
-            "expires_at": expires_at,
-        },
-        headers={"Prefer": "resolution=ignore-duplicates"},
-    )
+    body: dict[str, Any] = {
+        "guild_id": guild_id,
+        "week_key": week_key,
+        "user_id": user_id,
+        "awarded_at": utc_now_iso(),
+        "expires_at": expires_at,
+    }
+    if reason:
+        body["reason"] = reason
+    if winning_tickers:
+        body["winning_tickers"] = winning_tickers
+    try:
+        _request(
+            "POST",
+            "winners",
+            query="?on_conflict=guild_id,week_key,user_id",
+            json_body=body,
+            headers={"Prefer": "resolution=ignore-duplicates"},
+        )
+    except SupabaseError as exc:
+        # Backward-compatible if migration not applied yet.
+        if reason or winning_tickers:
+            _request(
+                "POST",
+                "winners",
+                query="?on_conflict=guild_id,week_key,user_id",
+                json_body={
+                    "guild_id": guild_id,
+                    "week_key": week_key,
+                    "user_id": user_id,
+                    "awarded_at": utc_now_iso(),
+                    "expires_at": expires_at,
+                },
+                headers={"Prefer": "resolution=ignore-duplicates"},
+            )
+        else:
+            raise exc
 
 
 def latest_winners_for_guild(guild_id: int) -> dict[str, Any] | None:
@@ -921,6 +953,17 @@ def active_winners(now_iso: str | None = None) -> list[dict[str, Any]]:
 
 def mark_winner_removed(winner_id: int) -> None:
     _request("PATCH", "winners", query=f"?id=eq.{winner_id}", json_body={"removed_at": utc_now_iso()})
+
+
+def get_message_state(guild_id: int, key: str) -> dict[str, Any] | None:
+    return _single(
+        "message_state",
+        f"?select=*&guild_id=eq.{guild_id}&key=eq.{_eq(key)}&limit=1",
+    )
+
+
+def list_message_states(guild_id: int) -> list[dict[str, Any]]:
+    return _select("message_state", f"?select=*&guild_id=eq.{guild_id}")
 
 
 def save_message_state(
