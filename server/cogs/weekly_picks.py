@@ -681,6 +681,19 @@ class WeeklyVotingView(discord.ui.View):
         limit: int,
         role_at_vote: str,
     ) -> None:
+        def _log_vote(event: str, **extra: object) -> None:
+            payload = {
+                "user_id": member.id,
+                "week_key": week_key,
+                "category": category_key,
+                "ticker": ticker,
+                "role_at_vote": role_at_vote,
+                **extra,
+            }
+            asyncio.create_task(
+                asyncio.to_thread(database.log_event, guild.id, event, payload)
+            )
+
         try:
             ctx = await asyncio.to_thread(
                 database.vote_button_context,
@@ -692,6 +705,7 @@ class WeeklyVotingView(discord.ui.View):
             )
             if not ctx["voting_open"]:
                 _revert_optimistic_vote(cat, member.id, ticker)
+                _log_vote("vote_rejected", reason="voting_closed")
                 await interaction.followup.send(
                     "Voting is closed. Next voting opens Monday at 9:00 AM ET.",
                     ephemeral=True,
@@ -701,6 +715,7 @@ class WeeklyVotingView(discord.ui.View):
             actual_cat = ctx["actual_category"]
             if not actual_cat:
                 _revert_optimistic_vote(cat, member.id, ticker)
+                _log_vote("vote_rejected", reason="not_on_ballot")
                 await interaction.followup.send(
                     f"${ticker} is not in this week's game lists.",
                     ephemeral=True,
@@ -715,6 +730,7 @@ class WeeklyVotingView(discord.ui.View):
 
             if ctx["prior_vote_category"]:
                 _revert_optimistic_vote(cat, member.id, ticker)
+                _log_vote("vote_rejected", reason="duplicate_prior")
                 await interaction.followup.send(
                     f"You already voted for ${ticker} this week.",
                     ephemeral=True,
@@ -724,12 +740,14 @@ class WeeklyVotingView(discord.ui.View):
             db_count = int(ctx["vote_count"])
             if db_count >= limit:
                 _revert_optimistic_vote(cat, member.id, ticker)
+                _log_vote("vote_rejected", reason="limit_reached", db_count=db_count, limit=limit)
                 await interaction.followup.send(
                     "YOU HAVE REACHED THE LIMIT OF YOUR VOTES. NEXT VOTING OPENS MONDAY 9AM.",
                     ephemeral=True,
                 )
                 return
 
+            is_early = is_early_window_active() and role_at_vote == "NPC"
             ok, reason = await asyncio.to_thread(
                 database.record_vote,
                 guild.id,
@@ -738,10 +756,11 @@ class WeeklyVotingView(discord.ui.View):
                 ticker,
                 member.id,
                 role_at_vote,
-                is_early_window_active() and role_at_vote == "NPC",
+                is_early,
             )
             if not ok:
                 _revert_optimistic_vote(cat, member.id, ticker)
+                _log_vote("vote_rejected", reason=reason or "save_failed")
                 if reason == "duplicate":
                     await interaction.followup.send(
                         f"You already voted for ${ticker}.",
@@ -761,8 +780,10 @@ class WeeklyVotingView(discord.ui.View):
 
             _record_early_vote_if_applicable(save_cat, member, ticker)
             _schedule_leaderboard_update(guild, save_cat)
-        except Exception:
+            _log_vote("vote_recorded", category=save_key, is_early=is_early)
+        except Exception as exc:
             _revert_optimistic_vote(cat, member.id, ticker)
+            _log_vote("vote_rejected", reason=f"exception:{exc!r}"[:200])
             try:
                 await interaction.followup.send(
                     "Your vote could not be saved. Please try again.",
