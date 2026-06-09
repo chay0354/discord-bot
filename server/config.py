@@ -28,6 +28,15 @@ CHANNEL_BLUE_LIVE = "large-cap-live"
 
 CHANNEL_MOD = "mod"
 CHANNEL_ADMIN_ACTIONS = "admin-actions"
+# Server rules — hidden from @everyone until a game role is assigned
+CHANNEL_RULES = os.getenv("RULES_CHANNEL", "𝖱𝖴𝖫𝖤𝖲📜")
+RULES_CHANNEL_CANDIDATES = tuple(
+    dict.fromkeys(
+        n.strip()
+        for n in os.getenv("RULES_CHANNEL_CANDIDATES", f"rules,{CHANNEL_RULES}").split(",")
+        if n.strip()
+    )
+)
 # Subscribe (new PLAYER checkout) — first matching channel name in guild wins
 CHANNEL_SUBSCRIBE = os.getenv("SUBSCRIBE_CHANNEL", "subscribe")
 SUBSCRIBE_CHANNEL_CANDIDATES = tuple(
