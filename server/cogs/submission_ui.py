@@ -187,6 +187,45 @@ def _pick_results_embed_scaffold() -> discord.Embed:
     return emb
 
 
+def _pick_results_embed_from_tickers(stored: dict[str, list[str]]) -> discord.Embed:
+    """Build the live pick-results board from Supabase ticker_picks (source of truth)."""
+    emb = _pick_results_embed_scaffold()
+    for idx, category in enumerate(("small", "mid", "blue")):
+        tickers = stored.get(category, [])
+        emb.set_field_at(
+            idx,
+            name=f"{_category_title_for_idx(idx)} ({len(tickers)}/{TICKER_LIMIT_PER_CATEGORY})",
+            value=_render_field_lines(tickers),
+            inline=False,
+        )
+    return emb
+
+
+async def _refresh_pick_results_embed_if_selecting(
+    guild: discord.Guild,
+    msg: discord.Message,
+    emb: discord.Embed,
+) -> discord.Embed:
+    """During pre-vote, always mirror ticker_picks into the live embed."""
+    if not database.is_ticker_selection_open(guild.id):
+        return emb
+    week_key = database.ticker_selection_week_key_for()
+    stored = database.list_tickers(guild.id, week_key)
+    new_emb = _pick_results_embed_from_tickers(stored)
+    await msg.edit(embed=new_emb)
+    return new_emb
+
+
+async def sync_pick_results_from_db(guild: discord.Guild) -> tuple[discord.Message, discord.Embed] | None:
+    """Refresh the #pick-results embed from ticker_picks for the active selection week."""
+    found = await _ensure_pick_results_message(guild)
+    if not found:
+        return None
+    msg, emb = found
+    new_emb = await _refresh_pick_results_embed_if_selecting(guild, msg, emb)
+    return msg, new_emb
+
+
 def _persist_pick_results_state(guild_id: int, channel_id: int, message_id: int) -> None:
     try:
         database.save_message_state(
@@ -221,18 +260,22 @@ async def _ensure_pick_results_message(guild: discord.Guild) -> tuple[discord.Me
         try:
             msg = await pr_ch.fetch_message(cached_id)
             if msg.embeds:
-                return msg, msg.embeds[0]
+                emb = await _refresh_pick_results_embed_if_selecting(guild, msg, msg.embeds[0])
+                return msg, emb
         except Exception:
             _pick_results_msg_id.pop(guild.id, None)
     found = await _find_pick_results_message(pr_ch)
     if found:
-        _pick_results_msg_id[guild.id] = found[0].id
-        _persist_pick_results_state(guild.id, pr_ch.id, found[0].id)
-        return found
+        msg, emb = found
+        _pick_results_msg_id[guild.id] = msg.id
+        _persist_pick_results_state(guild.id, pr_ch.id, msg.id)
+        emb = await _refresh_pick_results_embed_if_selecting(guild, msg, emb)
+        return msg, emb
     msg = await pr_ch.send(embed=_pick_results_embed_scaffold())
     _pick_results_msg_id[guild.id] = msg.id
     _persist_pick_results_state(guild.id, pr_ch.id, msg.id)
-    return msg, msg.embeds[0]
+    emb = await _refresh_pick_results_embed_if_selecting(guild, msg, msg.embeds[0])
+    return msg, emb
 
 
 def _parse_field_lines(val: str | None) -> list[str]:
@@ -296,49 +339,19 @@ async def _try_add_ticker_to_pick_results(
         )
         if not ok:
             return False, reason, None
-    # ensure 3 fields
-    while len(emb.fields) < 3:
-        emb.add_field(name="—", value="—", inline=False)
-
-    field = emb.fields[category_idx]
-    current = _parse_field_lines(field.value)
-    t = ticker.upper()
-    if submitted_by is None:
+    else:
+        t = ticker.upper()
+        current = _parse_field_lines(emb.fields[category_idx].value if category_idx < len(emb.fields) else None)
         if t in current:
             return False, "duplicate", len(current)
         if len(current) >= TICKER_LIMIT_PER_CATEGORY:
             return False, "full", len(current)
-        current.append(t)
-    elif t not in current:
-        current.append(t)
 
-    # update the field name with count
-    base_name = _category_title_for_idx(category_idx)
-    new_name = f"{base_name} ({len(current)}/{TICKER_LIMIT_PER_CATEGORY})"
-    new_value = _render_field_lines(current)
-
-    # rebuild embed (discord.py doesn't support editing a single field in place)
-    new_emb = discord.Embed(
-        title=emb.title or "PICK RESULTS",
-        description=emb.description,
-        color=emb.color
-    )
-    for i in range(3):
-        if i == category_idx:
-            new_emb.add_field(name=new_name, value=new_value, inline=False)
-        else:
-            if i < len(emb.fields):
-                new_emb.add_field(
-                    name=emb.fields[i].name, value=emb.fields[i].value, inline=False)
-            else:
-                new_emb.add_field(
-                    name=_category_title_for_idx(i) + f" (0/{TICKER_LIMIT_PER_CATEGORY})",
-                    value="—",
-                    inline=False
-                )
-
-    await msg.edit(embed=new_emb)
-    return True, "ok", len(current)
+    synced = await sync_pick_results_from_db(guild)
+    if not synced:
+        return False, "not_found", None
+    count = len(database.list_tickers(guild.id, week_key).get(category_key, []))
+    return True, "ok", count
 
 
 # --------- closed-channel helpers (read-only; no side effects) ---------
@@ -1076,6 +1089,20 @@ class SubmissionUICog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        """Rehydrate #pick-results from Supabase after a restart (embed alone is not durable)."""
+        if getattr(self, "_pick_results_synced", False):
+            return
+        self._pick_results_synced = True
+        for guild in self.bot.guilds:
+            try:
+                if database.is_ticker_selection_open(guild.id):
+                    await sync_pick_results_from_db(guild)
+                    print(f"[submission_ui] pick-results synced from DB for guild {guild.id}", flush=True)
+            except Exception as exc:
+                print(f"[submission_ui] pick-results sync failed for {guild.id}: {exc!r}", flush=True)
+
     @commands.command(name="ui_picker")
     async def ui_picker(self, ctx: commands.Context):
         if isinstance(ctx.channel, discord.TextChannel) and await _is_channel_closed(ctx.channel):
@@ -1126,16 +1153,7 @@ class SubmissionUICog(commands.Cog):
 
         week_key = database.ticker_selection_week_key_for()
         stored = database.list_tickers(ctx.guild.id, week_key) if ctx.guild else {"small": [], "mid": [], "blue": []}
-        new = _pick_results_embed_scaffold()
-        for idx, category in enumerate(("small", "mid", "blue")):
-            tickers = stored[category]
-            new.set_field_at(
-                idx,
-                name=f"{_category_title_for_idx(idx)} ({len(tickers)}/{TICKER_LIMIT_PER_CATEGORY})",
-                value=_render_field_lines(tickers),
-                inline=False,
-            )
-
+        new = _pick_results_embed_from_tickers(stored)
         await msg.edit(embed=new)
         await ctx.send("Refreshed pick-results from the Supabase ticker selections. Broadcasting closed banners where needed…")
 

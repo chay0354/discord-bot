@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import unicodedata
 from datetime import datetime, date, time as dtime, timedelta, timezone
 from typing import Optional, List, Tuple
 
@@ -206,6 +207,33 @@ def _friday_4pm_et_for_week(dt_utc: datetime) -> datetime:
 def _find_text_channel(guild: discord.Guild, name: str) -> Optional[discord.TextChannel]:
     for ch in guild.text_channels:
         if ch.name.lower() == name.lower():
+            return ch
+    return None
+
+
+def _normalize_channel_name(name: str) -> str:
+    """Fold fancy Unicode (math-alphanumerics, full-width digits, emoji) to plain
+    ascii letters/digits so channel matching is resilient to styled names."""
+    folded = unicodedata.normalize("NFKC", name or "").lower()
+    return "".join(ch for ch in folded if ch.isalnum())
+
+
+def _find_winners_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    """Resolve the 1st-place WINNERS channel even when it uses styled Unicode.
+
+    Tries the configured name first, then a normalized keyword match so a channel
+    like '🏆１st-𝐑𝐀𝐍𝐊𝐄𝐃🏆' still resolves to keywords 1st / rank / winner.
+    """
+    exact = _find_text_channel(guild, CHANNEL_WINNERS)
+    if exact:
+        return exact
+    target_norm = _normalize_channel_name(CHANNEL_WINNERS)
+    keywords = ("1stranked", "1st", "ranked", "rank", "winner", "winners")
+    for ch in guild.text_channels:
+        norm = _normalize_channel_name(ch.name)
+        if not norm:
+            continue
+        if norm == target_norm or any(kw in norm for kw in keywords):
             return ch
     return None
 
@@ -868,8 +896,22 @@ class SchedulerCog(commands.Cog):
         valid_until_utc: datetime,
     ) -> None:
         """Append (or update) one week's winner announcement — history is never cleared."""
-        winner_channel = _find_text_channel(guild, CHANNEL_WINNERS)
+        winner_channel = _find_winners_channel(guild)
         if not winner_channel:
+            print(
+                f"[scheduler] winners channel not found for guild {guild.id} "
+                f"(looked for '{CHANNEL_WINNERS}' / 1st-ranked)",
+                flush=True,
+            )
+            await self._announce_mod(
+                guild,
+                "Winners Channel Missing",
+                (
+                    f"Could not find the 1st-place winners channel (expected `{CHANNEL_WINNERS}`). "
+                    "Winner announcement was not posted. Set `WINNERS_CHANNEL` or rename the channel."
+                ),
+                discord.Color.red(),
+            )
             return
 
         embed = self._build_winner_week_embed(
@@ -928,6 +970,27 @@ class SchedulerCog(commands.Cog):
                 winner_ids=winner_ids,
                 valid_until_utc=self._expires_for_completed_game(game),
             )
+
+    async def _resolve_present_member(
+        self, guild: discord.Guild, user_id: int
+    ) -> Optional[discord.Member]:
+        """Authoritatively resolve a member who is STILL in the guild.
+
+        Returns the member if present, or None if they left/were banned. Uses the
+        cache first, then a direct API fetch so a cache miss never wrongly drops a
+        valid winner, and ``NotFound`` confirms the user is gone (so they are not a
+        winner and receive no DM).
+        """
+        member = guild.get_member(user_id)
+        if member is not None:
+            return member
+        try:
+            return await guild.fetch_member(user_id)
+        except discord.NotFound:
+            return None  # left or banned — definitively not in the server
+        except (discord.HTTPException, discord.Forbidden) as exc:
+            print(f"[scheduler] fetch_member({user_id}) failed: {exc!r}", flush=True)
+            return None
 
     async def _friday_close_one_guild(self, guild: discord.Guild) -> "StepReport":
         now_utc = _now_utc()
@@ -1044,11 +1107,12 @@ class SchedulerCog(commands.Cog):
         # ADMIN or WINNER is never awarded — this is the final guard that keeps
         # subscribers/staff out even if an old vote row is stale.
         blocking_roles = {ROLE_PLAYER.upper(), ROLE_ADMIN.upper(), ROLE_WINNER.upper()}
+        present_members: dict[int, discord.Member] = {}
         for user_id in eligible:
             if user_id in active_ids:
                 drop_reasons.append(f"{user_id}: active WINNER grant")
                 continue
-            member = guild.get_member(user_id)
+            member = await self._resolve_present_member(guild, user_id)
             if member is None:
                 drop_reasons.append(f"{user_id}: left/banned")
                 continue  # left or banned — never announce or award
@@ -1056,6 +1120,7 @@ class SchedulerCog(commands.Cog):
             if held:
                 drop_reasons.append(f"{user_id}: holds {'/'.join(sorted(held))} (not a pure NPC)")
                 continue
+            present_members[user_id] = member
             winners.append(user_id)
         if drop_reasons:
             print(f"[scheduler] winners excluded at award: {drop_reasons}", flush=True)
@@ -1089,10 +1154,17 @@ class SchedulerCog(commands.Cog):
         expires_at = (now_utc + timedelta(days=7)).isoformat()
         granted = 0
         grant_errors = 0
+        dm_sent = 0
+        dm_failed: list[int] = []
         if winners and winner_role:
             for user_id in winners:
-                member = guild.get_member(user_id)
+                # Re-confirm presence right before awarding so a member who left
+                # between validation and award is never granted or DM'd.
+                member = present_members.get(user_id) or await self._resolve_present_member(
+                    guild, user_id
+                )
                 if not member:
+                    drop_reasons.append(f"{user_id}: left before award")
                     continue
                 try:
                     database.add_winner(
@@ -1120,13 +1192,28 @@ class SchedulerCog(commands.Cog):
                             "expires_at": expires_at,
                         },
                     )
-                    try:
-                        await member.send(_winner_role_dm(now_utc + timedelta(days=7)))
-                    except Exception as dm_exc:
-                        print(f"[scheduler] winner DM to {user_id} failed: {dm_exc!r}", flush=True)
                 except Exception as role_exc:
                     print(f"[scheduler] WINNER role grant to {user_id} failed: {role_exc!r}", flush=True)
                     grant_errors += 1
+                    continue
+                # Send the winner DM only to a member who is in the server (already
+                # confirmed above). A blocked/closed-DM failure is logged, not fatal.
+                try:
+                    await member.send(_winner_role_dm(now_utc + timedelta(days=7)))
+                    dm_sent += 1
+                    database.log_event(
+                        guild.id,
+                        "winner_dm_sent",
+                        {"discord_id": user_id, "week_key": week_key},
+                    )
+                except (discord.Forbidden, discord.HTTPException) as dm_exc:
+                    dm_failed.append(user_id)
+                    print(f"[scheduler] winner DM to {user_id} failed: {dm_exc!r}", flush=True)
+                    database.log_event(
+                        guild.id,
+                        "winner_dm_failed",
+                        {"discord_id": user_id, "week_key": week_key, "error": repr(dm_exc)},
+                    )
         if not winner_role:
             rpt.fail("WINNER roles were added to the winners", f"role '{ROLE_WINNER}' not found")
         else:
@@ -1135,6 +1222,17 @@ class SchedulerCog(commands.Cog):
                 grant_errors == 0,
                 f"{granted} granted" + (f", {grant_errors} failed" if grant_errors else ""),
             )
+            if winners:
+                dm_detail = f"{dm_sent}/{len(winners)} delivered"
+                if dm_failed:
+                    dm_detail += " — failed (DMs closed): " + ", ".join(
+                        f"<@{uid}>" for uid in dm_failed
+                    )
+                rpt.check(
+                    "Winner DMs were delivered",
+                    not dm_failed,
+                    dm_detail,
+                )
 
         # 8) Close live-leaderboard channels: delete tables + post closing message.
         live_close = discord.Embed(
