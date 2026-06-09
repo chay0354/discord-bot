@@ -240,12 +240,12 @@ def main() -> int:
         print(f"[WARN] No channel named exactly {CHANNEL_FINAL_LEADERBOARD!r}; skipping.")
     else:
         print(f"Channel: #{target['name']} (id={target['id']})")
-        new_ow = role_gated_view_overwrites(roles, GUILD_ID)
+        new_ow = entry_view_overwrites(roles, GUILD_ID)
         if APPLY:
             patch_channel(target["id"], {"permission_overwrites": new_ow})
-            print("  -> updated overwrites: @everyone hidden, NPC/PLAYER/WINNER view, ADMIN view+send")
+            print("  -> updated overwrites: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
         else:
-            print("  would update overwrites to: @everyone hidden, NPC/PLAYER/WINNER view, ADMIN view+send")
+            print("  would update overwrites to: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
 
     print("\n--- Fix 2: Winners channel ---")
     target = find_channel_by_exact_name(channels, CHANNEL_WINNERS)
@@ -253,12 +253,12 @@ def main() -> int:
         print(f"[WARN] No channel named exactly {CHANNEL_WINNERS!r}; skipping.")
     else:
         print(f"Channel: #{target['name']} (id={target['id']})")
-        new_ow = role_gated_view_overwrites(roles, GUILD_ID)
+        new_ow = entry_view_overwrites(roles, GUILD_ID)
         if APPLY:
             patch_channel(target["id"], {"permission_overwrites": new_ow})
-            print("  -> updated overwrites: @everyone hidden, NPC/PLAYER/WINNER view, ADMIN view+send")
+            print("  -> updated overwrites: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
         else:
-            print("  would update overwrites to: @everyone hidden, NPC/PLAYER/WINNER view, ADMIN view+send")
+            print("  would update overwrites to: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
 
     print("\n--- Fix 3: Rules channel ---")
     found_rules: dict | None = None
@@ -322,7 +322,7 @@ def main() -> int:
             break
     if found_manage:
         print(f"Channel: #{found_manage['name']} (id={found_manage['id']})")
-        new_ow = role_gated_view_overwrites(roles, GUILD_ID)
+        new_ow = entry_view_overwrites(roles, GUILD_ID)
         manage_parent = found_manage.get("parent_id")
         needs_category = (
             subscribe_category_id
@@ -339,11 +339,11 @@ def main() -> int:
             if needs_category:
                 payload["parent_id"] = subscribe_category_id
             patch_channel(found_manage["id"], payload)
-            print("  -> updated overwrites: @everyone hidden, NPC/PLAYER/WINNER view, ADMIN view+send")
+            print("  -> updated overwrites: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
             if needs_category:
                 print(f"  -> moved under subscribe category (id={subscribe_category_id})")
         else:
-            print("  would update overwrites to: @everyone hidden, NPC/PLAYER/WINNER view, ADMIN view+send")
+            print("  would update overwrites to: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
             if needs_category:
                 print(f"  would move under subscribe category (id={subscribe_category_id})")
     else:
@@ -359,7 +359,7 @@ def main() -> int:
             payload = {
                 "name": CHANNEL_MANAGE_SUBSCRIPTION,
                 "type": 0,
-                "permission_overwrites": role_gated_view_overwrites(roles, GUILD_ID),
+                "permission_overwrites": entry_view_overwrites(roles, GUILD_ID),
                 "topic": "Manage your PLAYER subscription via Stripe billing portal.",
             }
             if subscribe_category_id:

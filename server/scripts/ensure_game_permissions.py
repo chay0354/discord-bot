@@ -168,14 +168,14 @@ class PermissionEnsurer(discord.Client):
                 CHANNEL_MID_LIVE: subscriber_overwrites(),
                 CHANNEL_BLUE_LIVE: subscriber_overwrites(),
                 CHANNEL_RULES: role_gated(),
-                CHANNEL_SMALL_VOTE: role_gated(),
-                CHANNEL_MID_VOTE: role_gated(),
-                CHANNEL_BLUE_VOTE: role_gated(),
+                CHANNEL_SMALL_VOTE: entry_public(),
+                CHANNEL_MID_VOTE: entry_public(),
+                CHANNEL_BLUE_VOTE: entry_public(),
                 CHANNEL_MOD: mod_overwrites(),
                 CHANNEL_ADMIN_ACTIONS: mod_overwrites(),
-                CHANNEL_FINAL_LEADERBOARD: role_gated(),
-                CHANNEL_WINNERS: role_gated(),
-                CHANNEL_MANAGE_SUBSCRIPTION: role_gated(),
+                CHANNEL_FINAL_LEADERBOARD: entry_public(),
+                CHANNEL_WINNERS: entry_public(),
+                CHANNEL_MANAGE_SUBSCRIPTION: entry_public(),
             }
             for name, overwrites in channel_specs.items():
                 await _ensure_channel(guild, name, overwrites)

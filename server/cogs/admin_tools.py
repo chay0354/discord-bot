@@ -32,7 +32,6 @@ from config import (
     CHANNEL_SMALL_VOTE,
     CHANNEL_WINNERS,
     RULES_CHANNEL_CANDIDATES,
-    SUBSCRIBE_CHANNEL_CANDIDATES,
     ROLE_ADMIN,
     ROLE_NPC,
     ROLE_PLAYER,
@@ -104,7 +103,10 @@ class AdminToolsCog(commands.Cog):
         return npc, player, winner, admin
 
     async def _sync_role_gated_permissions(self, guild: discord.Guild) -> None:
-        """Keep rules/game channels hidden from @everyone (roleless new members)."""
+        """Keep ONLY the rules channel hidden from @everyone (roleless new members).
+
+        All other channels keep their existing visibility; we don't touch them here.
+        """
         me = guild.me
         if not me or not me.guild_permissions.manage_channels:
             return
@@ -113,37 +115,16 @@ class AdminToolsCog(commands.Cog):
             return
         npc, player, winner, admin = roles
         gated = role_gated_view_overwrites(guild, npc, player, winner, admin, me)
-        entry = entry_view_overwrites(guild, npc, player, winner, admin, me)
 
-        gated_names = {
-            CHANNEL_RULES,
-            CHANNEL_SMALL_VOTE,
-            CHANNEL_MID_VOTE,
-            CHANNEL_BLUE_VOTE,
-            CHANNEL_FINAL_LEADERBOARD,
-            CHANNEL_WINNERS,
-            CHANNEL_MANAGE_SUBSCRIPTION,
-        }
-        for name in RULES_CHANNEL_CANDIDATES:
-            gated_names.add(name)
-
+        gated_names = {CHANNEL_RULES, *RULES_CHANNEL_CANDIDATES}
         for name in gated_names:
             channel = self._find_channel(guild, name)
             if not channel:
                 continue
             try:
-                await channel.edit(overwrites=gated, reason="Role-gated channel sync")
+                await channel.edit(overwrites=gated, reason="Hide rules channel from roleless members")
             except (discord.Forbidden, discord.HTTPException) as exc:
                 print(f"[admin_tools] could not sync #{channel.name}: {exc!r}", flush=True)
-
-        for name in SUBSCRIBE_CHANNEL_CANDIDATES:
-            channel = self._find_channel(guild, name)
-            if channel:
-                try:
-                    await channel.edit(overwrites=entry, reason="Entry channel sync")
-                except (discord.Forbidden, discord.HTTPException) as exc:
-                    print(f"[admin_tools] could not sync #{channel.name}: {exc!r}", flush=True)
-                break
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -240,18 +221,18 @@ class AdminToolsCog(commands.Cog):
             CHANNEL_BLUE_TICKER: subscriber_overwrites(),
             CHANNEL_PICK_RESULTS: subscriber_overwrites(),
             CHANNEL_RULES: role_gated(),
-            CHANNEL_SMALL_VOTE: role_gated(),
-            CHANNEL_MID_VOTE: role_gated(),
-            CHANNEL_BLUE_VOTE: role_gated(),
+            CHANNEL_SMALL_VOTE: entry_public(),
+            CHANNEL_MID_VOTE: entry_public(),
+            CHANNEL_BLUE_VOTE: entry_public(),
             CHANNEL_SMALL_LIVE: subscriber_overwrites(),
             CHANNEL_MID_LIVE: subscriber_overwrites(),
             CHANNEL_BLUE_LIVE: subscriber_overwrites(),
             CHANNEL_MOD: mod_overwrites(),
             CHANNEL_ADMIN_ACTIONS: mod_overwrites(),
             CHANNEL_SUBSCRIBE: entry_public(),
-            CHANNEL_MANAGE_SUBSCRIPTION: role_gated(),
-            CHANNEL_FINAL_LEADERBOARD: role_gated(),
-            CHANNEL_WINNERS: role_gated(),
+            CHANNEL_MANAGE_SUBSCRIPTION: entry_public(),
+            CHANNEL_FINAL_LEADERBOARD: entry_public(),
+            CHANNEL_WINNERS: entry_public(),
         }
 
         for name, overwrites in channel_specs.items():
