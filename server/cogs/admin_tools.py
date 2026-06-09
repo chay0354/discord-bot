@@ -103,9 +103,9 @@ class AdminToolsCog(commands.Cog):
         return npc, player, winner, admin
 
     async def _sync_role_gated_permissions(self, guild: discord.Guild) -> None:
-        """Keep ONLY the rules channel hidden from @everyone (roleless new members).
+        """Keep the rules + vote channels hidden from @everyone (roleless members).
 
-        All other channels keep their existing visibility; we don't touch them here.
+        Other channels keep their existing visibility; we don't touch them here.
         """
         me = guild.me
         if not me or not me.guild_permissions.manage_channels:
@@ -116,7 +116,13 @@ class AdminToolsCog(commands.Cog):
         npc, player, winner, admin = roles
         gated = role_gated_view_overwrites(guild, npc, player, winner, admin, me)
 
-        gated_names = {CHANNEL_RULES, *RULES_CHANNEL_CANDIDATES}
+        gated_names = {
+            CHANNEL_RULES,
+            CHANNEL_SMALL_VOTE,
+            CHANNEL_MID_VOTE,
+            CHANNEL_BLUE_VOTE,
+            *RULES_CHANNEL_CANDIDATES,
+        }
         for name in gated_names:
             channel = self._find_channel(guild, name)
             if not channel:
@@ -221,9 +227,9 @@ class AdminToolsCog(commands.Cog):
             CHANNEL_BLUE_TICKER: subscriber_overwrites(),
             CHANNEL_PICK_RESULTS: subscriber_overwrites(),
             CHANNEL_RULES: role_gated(),
-            CHANNEL_SMALL_VOTE: entry_public(),
-            CHANNEL_MID_VOTE: entry_public(),
-            CHANNEL_BLUE_VOTE: entry_public(),
+            CHANNEL_SMALL_VOTE: role_gated(),
+            CHANNEL_MID_VOTE: role_gated(),
+            CHANNEL_BLUE_VOTE: role_gated(),
             CHANNEL_SMALL_LIVE: subscriber_overwrites(),
             CHANNEL_MID_LIVE: subscriber_overwrites(),
             CHANNEL_BLUE_LIVE: subscriber_overwrites(),
