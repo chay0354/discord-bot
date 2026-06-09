@@ -2,7 +2,7 @@
 # Purpose: Weekly time-based automation. On Monday 09:00 ET:
 # - Arm Early Window (24h)
 # - Push tickers from #pick-results to WEEKLY channels as "VOTING OPEN" + live countdown + voting buttons
-# - Reset #pick-results to 0/20
+# - Keep #pick-results showing this week's ballot during voting (cleared on Friday close)
 # - Close ticker submission channels visually (post "Submissions Closed (x/20)" and remove bot messages)
 # - Log a concise report to #mod
 # Includes robust ET/DST fallback (works even without tzdata).
@@ -69,6 +69,7 @@ from cogs.submission_ui import (
     _extract_lists_from_pick_results,
     _closed_banner_embed,
     _clear_pick_results_message,
+    sync_pick_results_from_db,
     reset_picker_runtime_state,
 )
 
@@ -610,15 +611,15 @@ class SchedulerCog(commands.Cog):
             f"{leaderboards_ok}/3 channels",
         )
 
-        # 4) Reset the live-chosen-tickers (PICK RESULTS) board.
+        # 4) Publish this week's ballot on the PICK RESULTS board (weekend pre-vote selections).
         try:
-            if pr_msg and pr_emb:
-                await _clear_pick_results_message(pr_msg, pr_emb)
-                rpt.ok("live-chosen-tickers board reset for next selection")
+            synced = await sync_pick_results_from_db(guild)
+            if synced:
+                rpt.ok("live-chosen-tickers board shows this week's ballot", "synced from ticker_picks")
             else:
-                rpt.info("live-chosen-tickers board reset for next selection", "no board found")
+                rpt.info("live-chosen-tickers board shows this week's ballot", "no board found")
         except Exception as exc:
-            rpt.fail("live-chosen-tickers board reset for next selection", repr(exc))
+            rpt.fail("live-chosen-tickers board shows this week's ballot", repr(exc))
 
         # 5) Close CHOOSE YOUR TICKER channels visually.
         ticker_map = {
@@ -1509,7 +1510,7 @@ class SchedulerCog(commands.Cog):
         ADMIN: run the full Monday-open automation NOW for this guild:
           - Arm 24h window
           - Push VOTING OPEN + buttons + countdown to WEEKLY channels
-          - Reset #pick-results
+          - Publish this week's ballot on #pick-results
           - Close ticker submission channels visually
           - Log to #mod
         """

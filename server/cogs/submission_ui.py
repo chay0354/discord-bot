@@ -187,13 +187,24 @@ def _pick_results_embed_scaffold() -> discord.Embed:
     return emb
 
 
-def _pick_results_embed_from_tickers(stored: dict[str, list[str]]) -> discord.Embed:
+def _pick_results_embed_from_tickers(
+    stored: dict[str, list[str]],
+    *,
+    ballot_locked: bool = False,
+) -> discord.Embed:
     """Build the live pick-results board from Supabase ticker_picks (source of truth)."""
-    emb = _pick_results_embed_scaffold()
+    desc = (
+        f"Small / Mid / Blue weekly lists. Each category closes at {TICKER_LIMIT_PER_CATEGORY} tickers."
+    )
+    if ballot_locked:
+        desc += (
+            "\n\n**This week's ballot** (from pre-vote). "
+            "Voting is open — vote in the WEEKLY PICKS channels."
+        )
+    emb = discord.Embed(title="PICK RESULTS", description=desc, color=discord.Color.gold())
     for idx, category in enumerate(("small", "mid", "blue")):
         tickers = stored.get(category, [])
-        emb.set_field_at(
-            idx,
+        emb.add_field(
             name=f"{_category_title_for_idx(idx)} ({len(tickers)}/{TICKER_LIMIT_PER_CATEGORY})",
             value=_render_field_lines(tickers),
             inline=False,
@@ -201,28 +212,38 @@ def _pick_results_embed_from_tickers(stored: dict[str, list[str]]) -> discord.Em
     return emb
 
 
-async def _refresh_pick_results_embed_if_selecting(
+def _pick_results_week_key_for_guild(guild_id: int) -> str | None:
+    """Week key whose ticker_picks should appear on #pick-results."""
+    if database.is_voting_open(guild_id):
+        return database.week_key_for()
+    if database.is_ticker_selection_open(guild_id):
+        return database.ticker_selection_week_key_for()
+    return None
+
+
+async def _refresh_pick_results_embed_from_db(
     guild: discord.Guild,
     msg: discord.Message,
     emb: discord.Embed,
 ) -> discord.Embed:
-    """During pre-vote, always mirror ticker_picks into the live embed."""
-    if not database.is_ticker_selection_open(guild.id):
+    """Mirror ticker_picks into #pick-results during pre-vote or voting."""
+    week_key = _pick_results_week_key_for_guild(guild.id)
+    if not week_key:
         return emb
-    week_key = database.ticker_selection_week_key_for()
     stored = database.list_tickers(guild.id, week_key)
-    new_emb = _pick_results_embed_from_tickers(stored)
+    ballot_locked = database.is_voting_open(guild.id)
+    new_emb = _pick_results_embed_from_tickers(stored, ballot_locked=ballot_locked)
     await msg.edit(embed=new_emb)
     return new_emb
 
 
 async def sync_pick_results_from_db(guild: discord.Guild) -> tuple[discord.Message, discord.Embed] | None:
-    """Refresh the #pick-results embed from ticker_picks for the active selection week."""
+    """Refresh the #pick-results embed from ticker_picks for the active pre-vote or voting week."""
     found = await _ensure_pick_results_message(guild)
     if not found:
         return None
     msg, emb = found
-    new_emb = await _refresh_pick_results_embed_if_selecting(guild, msg, emb)
+    new_emb = await _refresh_pick_results_embed_from_db(guild, msg, emb)
     return msg, new_emb
 
 
@@ -260,7 +281,7 @@ async def _ensure_pick_results_message(guild: discord.Guild) -> tuple[discord.Me
         try:
             msg = await pr_ch.fetch_message(cached_id)
             if msg.embeds:
-                emb = await _refresh_pick_results_embed_if_selecting(guild, msg, msg.embeds[0])
+                emb = await _refresh_pick_results_embed_from_db(guild, msg, msg.embeds[0])
                 return msg, emb
         except Exception:
             _pick_results_msg_id.pop(guild.id, None)
@@ -269,12 +290,12 @@ async def _ensure_pick_results_message(guild: discord.Guild) -> tuple[discord.Me
         msg, emb = found
         _pick_results_msg_id[guild.id] = msg.id
         _persist_pick_results_state(guild.id, pr_ch.id, msg.id)
-        emb = await _refresh_pick_results_embed_if_selecting(guild, msg, emb)
+        emb = await _refresh_pick_results_embed_from_db(guild, msg, emb)
         return msg, emb
     msg = await pr_ch.send(embed=_pick_results_embed_scaffold())
     _pick_results_msg_id[guild.id] = msg.id
     _persist_pick_results_state(guild.id, pr_ch.id, msg.id)
-    emb = await _refresh_pick_results_embed_if_selecting(guild, msg, msg.embeds[0])
+    emb = await _refresh_pick_results_embed_from_db(guild, msg, msg.embeds[0])
     return msg, emb
 
 
@@ -1097,7 +1118,7 @@ class SubmissionUICog(commands.Cog):
         self._pick_results_synced = True
         for guild in self.bot.guilds:
             try:
-                if database.is_ticker_selection_open(guild.id):
+                if database.is_ticker_selection_open(guild.id) or database.is_voting_open(guild.id):
                     await sync_pick_results_from_db(guild)
                     print(f"[submission_ui] pick-results synced from DB for guild {guild.id}", flush=True)
             except Exception as exc:
@@ -1151,9 +1172,14 @@ class SubmissionUICog(commands.Cog):
         else:
             msg, emb = found
 
-        week_key = database.ticker_selection_week_key_for()
-        stored = database.list_tickers(ctx.guild.id, week_key) if ctx.guild else {"small": [], "mid": [], "blue": []}
-        new = _pick_results_embed_from_tickers(stored)
+        week_key = _pick_results_week_key_for_guild(ctx.guild.id) if ctx.guild else None
+        stored = (
+            database.list_tickers(ctx.guild.id, week_key)
+            if week_key and ctx.guild
+            else {"small": [], "mid": [], "blue": []}
+        )
+        ballot_locked = bool(ctx.guild and database.is_voting_open(ctx.guild.id))
+        new = _pick_results_embed_from_tickers(stored, ballot_locked=ballot_locked)
         await msg.edit(embed=new)
         await ctx.send("Refreshed pick-results from the Supabase ticker selections. Broadcasting closed banners where needed…")
 
