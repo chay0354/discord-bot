@@ -1,8 +1,7 @@
-"""Reaction-role onboarding gate: press emoji in the RULES channel -> NPC role.
+"""Reaction-role onboarding: react on the existing RULES message (bla + 🔥 🚀) -> NPC.
 
-Posts (or reuses) a gate message in #RULES with reaction emojis (default 🔥 🚀).
-When a member reacts, they receive the NPC role. Matches the original Carl-bot
-flow in the RULES channel.
+Does not post a duplicate gate message. Uses the existing rules-channel message
+that already has the gate emojis (e.g. Carl-bot's "bla" message).
 """
 from __future__ import annotations
 
@@ -19,12 +18,7 @@ from config import (
     RULES_CHANNEL_CANDIDATES,
 )
 
-GATE_MARKER = "npc-gate-v1"
-GATE_TITLE = "Get Access"
-GATE_BODY = (
-    "React with **{emojis}** below to join the game as a free member (**NPC**).\n\n"
-    "NPC members get **1 vote** per category during the weekly stock game."
-)
+GATE_MARKER = "npc-gate-v1"  # legacy: delete if our bot posted one before
 
 
 class OnboardingCog(commands.Cog):
@@ -46,16 +40,6 @@ class OnboardingCog(commands.Cog):
                 return ch
         return None
 
-    def _gate_embed(self) -> discord.Embed:
-        emoji_list = " / ".join(NPC_GATE_EMOJIS)
-        embed = discord.Embed(
-            title=GATE_TITLE,
-            description=GATE_BODY.format(emojis=emoji_list),
-            color=discord.Color.green(),
-        )
-        embed.set_footer(text=GATE_MARKER)
-        return embed
-
     @commands.Cog.listener()
     async def on_ready(self) -> None:
         if self._synced:
@@ -63,43 +47,48 @@ class OnboardingCog(commands.Cog):
         self._synced = True
         for guild in self.bot.guilds:
             try:
-                await self._ensure_gate_message(guild)
+                await self._bind_gate_message(guild)
             except Exception as exc:  # noqa: BLE001
-                print(f"[onboarding] gate setup failed for {guild.id}: {exc!r}", flush=True)
+                print(f"[onboarding] gate bind failed for {guild.id}: {exc!r}", flush=True)
 
-    async def _ensure_gate_message(self, guild: discord.Guild) -> None:
+    async def _bind_gate_message(self, guild: discord.Guild) -> None:
+        """Find the existing rules gate (bla + emojis); remove any duplicate we posted."""
         channel = self._rules_channel(guild)
         if not channel:
             print(f"[onboarding] no rules channel in guild {guild.id}", flush=True)
             return
 
-        existing: discord.Message | None = None
+        gate: discord.Message | None = None
         try:
             async for msg in channel.history(limit=50):
-                if msg.author.id != self.bot.user.id:
+                # Remove legacy duplicate embeds posted by this bot.
+                if msg.author.id == self.bot.user.id:
+                    if any(e.footer and e.footer.text == GATE_MARKER for e in msg.embeds):
+                        try:
+                            await msg.delete()
+                            print(f"[onboarding] removed duplicate gate embed in {guild.id}", flush=True)
+                        except (discord.Forbidden, discord.HTTPException):
+                            pass
                     continue
-                if any(e.footer and e.footer.text == GATE_MARKER for e in msg.embeds):
-                    existing = msg
-                    break
+                if gate is not None:
+                    continue
+                reaction_emojis = {str(r.emoji) for r in msg.reactions}
+                if any(em in reaction_emojis for em in NPC_GATE_EMOJIS):
+                    gate = msg
         except (discord.Forbidden, discord.HTTPException) as exc:
             print(f"[onboarding] cannot read rules history in {guild.id}: {exc!r}", flush=True)
+            return
 
-        if existing is None:
-            try:
-                existing = await channel.send(embed=self._gate_embed())
-            except (discord.Forbidden, discord.HTTPException) as exc:
-                print(f"[onboarding] cannot post gate message in {guild.id}: {exc!r}", flush=True)
-                return
+        if gate is None:
+            print(f"[onboarding] no gate message with {NPC_GATE_EMOJIS} in {guild.id}", flush=True)
+            return
 
-        self._gate_message_ids[guild.id] = existing.id
-
-        present = {str(r.emoji) for r in existing.reactions if r.me}
-        for emoji in NPC_GATE_EMOJIS:
-            if emoji not in present:
-                try:
-                    await existing.add_reaction(emoji)
-                except (discord.Forbidden, discord.HTTPException) as exc:
-                    print(f"[onboarding] cannot add {emoji} reaction in {guild.id}: {exc!r}", flush=True)
+        self._gate_message_ids[guild.id] = gate.id
+        print(
+            f"[onboarding] bound gate msg {gate.id} in #{channel.name} "
+            f"(author={gate.author})",
+            flush=True,
+        )
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
@@ -155,14 +144,14 @@ class OnboardingCog(commands.Cog):
     @commands.has_role("ADMIN")
     @commands.guild_only()
     async def post_npc_gate(self, ctx: commands.Context) -> None:
-        """ADMIN: (re)post the 'react to get NPC' gate in the rules channel."""
-        await self._ensure_gate_message(ctx.guild)
+        """ADMIN: re-bind the rules gate message (does not post a new one)."""
+        await self._bind_gate_message(ctx.guild)
+        gate_id = self._gate_message_ids.get(ctx.guild.id)
         ch = self._rules_channel(ctx.guild)
-        if ch:
-            emojis = " ".join(NPC_GATE_EMOJIS)
-            await ctx.send(f"NPC gate is set in {ch.mention} with reactions {emojis}.")
+        if gate_id and ch:
+            await ctx.send(f"NPC gate bound to message `{gate_id}` in {ch.mention}.")
         else:
-            await ctx.send("No rules channel found. Set RULES_CHANNEL env or create one.")
+            await ctx.send("No gate message with 🔥/🚀 found in the rules channel.")
 
 
 async def setup(bot: commands.Bot):
