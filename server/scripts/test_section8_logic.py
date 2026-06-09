@@ -16,6 +16,8 @@ def main() -> int:
     runner_src = inspect.getsource(sched._runner)
     monday_src = inspect.getsource(sched._monday_open_one_guild)
     publish_src = inspect.getsource(sched._publish_last_game_winners)
+    embed_src = inspect.getsource(sched._build_winner_week_embed)
+    sched_src = (ROOT / "cogs" / "scheduler.py").read_text(encoding="utf-8")
     final_src = inspect.getsource(
         __import__("cogs.weekly_picks", fromlist=["build_final_leaderboard_embeds"]).build_final_leaderboard_embeds
     )
@@ -36,8 +38,12 @@ def main() -> int:
     if "all_vote_counts" not in final_src and "vote_counts" not in final_src:
         fails.append("final tables must use DB vote counts")
 
-    if "No winner met all eligibility conditions" not in publish_src:
+    if "No winner met all eligibility conditions" not in embed_src:
         fails.append("winners channel must handle no-winner case")
+    if "_delete_bot_messages" in publish_src:
+        fails.append("winners channel must keep history (no purge on publish)")
+    if "save_message_state" not in publish_src or "winners_week:" not in sched_src:
+        fails.append("winners channel must persist per-week message ids for idempotent history")
 
     # Monday open clears weekly temp content; final leaderboard is posted only on Friday close.
     if "_purge_channel_messages" not in monday_src:
@@ -58,6 +64,7 @@ def main() -> int:
     print("  • Friday 16:00 ET scheduler closes voting")
     print("  • Weekly channels purged; voting_open=False; reopen message posted")
     print("  • 3 final category tables from DB counts; no-winner message exists")
+    print("  • Winners channel appends weekly history (no reset)")
     print("  • Monday open clears weekly temp only; final history retained")
     return 0
 

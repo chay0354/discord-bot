@@ -397,12 +397,16 @@ class SchedulerCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        """Remove expired WINNER roles after restarts (not only on Friday close)."""
+        """Remove expired WINNER roles and back-fill winner history after restarts."""
         for guild in list(self.bot.guilds):
             try:
                 await self._expire_winners(guild)
             except Exception as exc:
                 print(f"[scheduler] winner expiry on_ready failed for {guild.id}: {exc!r}")
+            try:
+                await self._refresh_last_game_winners_from_db(guild)
+            except Exception as exc:
+                print(f"[scheduler] winner history sync on_ready failed for {guild.id}: {exc!r}")
 
     def cog_unload(self):
         if self._task and not self._task.done():
@@ -824,25 +828,21 @@ class SchedulerCog(commands.Cog):
             )
         return removed
 
-    async def _publish_last_game_winners(
+    def _winners_week_state_key(self, week_key: str) -> str:
+        return f"winners_week:{week_key}"
+
+    def _build_winner_week_embed(
         self,
-        guild: discord.Guild,
         *,
         week_key: str,
         winner_ids: list[int],
         valid_until_utc: datetime,
-    ) -> None:
-        winner_channel = _find_text_channel(guild, CHANNEL_WINNERS)
-        if not winner_channel:
-            return
-
-        await _delete_bot_messages(winner_channel, guild, limit=200)
+    ) -> discord.Embed:
         if winner_ids:
             mentions = "\n".join(f"<@{user_id}>" for user_id in winner_ids)
-            embed = discord.Embed(
-                title="LAST GAME WINNER",
+            return discord.Embed(
+                title=f"Winners — Week {week_key}",
                 description=(
-                    f"Week: **{week_key}**\n"
                     f"Winner(s):\n{mentions}\n\n"
                     f"Role: **{ROLE_WINNER}** (one week)\n"
                     f"Valid until: **{_format_et(valid_until_utc)}**\n\n"
@@ -851,31 +851,81 @@ class SchedulerCog(commands.Cog):
                 ),
                 color=discord.Color.gold(),
             )
-        else:
-            embed = discord.Embed(
-                title="LAST GAME WINNER",
-                description=f"Week: **{week_key}**\nNo winner met all eligibility conditions.",
-                color=discord.Color.dark_grey(),
+        return discord.Embed(
+            title=f"Winners — Week {week_key}",
+            description="No winner met all eligibility conditions.",
+            color=discord.Color.dark_grey(),
+        )
+
+    async def _publish_last_game_winners(
+        self,
+        guild: discord.Guild,
+        *,
+        week_key: str,
+        winner_ids: list[int],
+        valid_until_utc: datetime,
+    ) -> None:
+        """Append (or update) one week's winner announcement — history is never cleared."""
+        winner_channel = _find_text_channel(guild, CHANNEL_WINNERS)
+        if not winner_channel:
+            return
+
+        embed = self._build_winner_week_embed(
+            week_key=week_key,
+            winner_ids=winner_ids,
+            valid_until_utc=valid_until_utc,
+        )
+        state_key = self._winners_week_state_key(week_key)
+        row = database.get_message_state(guild.id, state_key)
+        cached_id = int(row["message_id"]) if row and row.get("message_id") else None
+        if cached_id:
+            try:
+                msg = await winner_channel.fetch_message(cached_id)
+                await msg.edit(embed=embed)
+                return
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        sent = await winner_channel.send(embed=embed)
+        try:
+            database.save_message_state(
+                guild.id,
+                state_key,
+                channel_id=winner_channel.id,
+                message_id=sent.id,
+                payload={"week_key": week_key, "kind": "winners_history"},
             )
-        await winner_channel.send(embed=embed)
+        except Exception as exc:
+            print(f"[scheduler] save_message_state({state_key}) failed: {exc!r}", flush=True)
+
+    def _expires_for_completed_game(self, game: dict) -> datetime:
+        closed_raw = game.get("closed_at")
+        try:
+            closed_at = datetime.fromisoformat(str(closed_raw))
+        except Exception:
+            closed_at = _now_utc()
+        if closed_at.tzinfo is None:
+            closed_at = closed_at.replace(tzinfo=UTC)
+        return closed_at + timedelta(days=7)
 
     async def _refresh_last_game_winners_from_db(self, guild: discord.Guild) -> None:
-        latest = database.latest_winners_for_guild(guild.id)
-        if not latest:
+        """Back-fill any missing winner-history posts from completed_games (oldest first)."""
+        games = database.list_completed_games(guild.id, limit=50)
+        if not games:
             return
-        expires_raw = latest.get("expires_at")
-        try:
-            expires_at = datetime.fromisoformat(str(expires_raw))
-        except Exception:
-            expires_at = _now_utc()
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=UTC)
-        await self._publish_last_game_winners(
-            guild,
-            week_key=str(latest["week_key"]),
-            winner_ids=list(latest["winner_ids"]),
-            valid_until_utc=expires_at,
-        )
+        games_sorted = sorted(games, key=lambda row: str(row.get("closed_at") or ""))
+        for game in games_sorted:
+            week_key = str(game.get("week_key") or "")
+            if not week_key:
+                continue
+            raw_ids = game.get("winner_ids") or []
+            winner_ids = [int(uid) for uid in raw_ids] if isinstance(raw_ids, list) else []
+            await self._publish_last_game_winners(
+                guild,
+                week_key=week_key,
+                winner_ids=winner_ids,
+                valid_until_utc=self._expires_for_completed_game(game),
+            )
 
     async def _friday_close_one_guild(self, guild: discord.Guild) -> "StepReport":
         now_utc = _now_utc()
