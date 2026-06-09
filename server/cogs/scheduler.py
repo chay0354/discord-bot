@@ -921,24 +921,35 @@ class SchedulerCog(commands.Cog):
         winner_role = discord.utils.get(guild.roles, name=ROLE_WINNER)
         active_ids = database.active_winner_user_ids(guild.id)
         winners: list[int] = []
+        drop_reasons: list[str] = []
+        # Contract: ONLY a pure NPC can win. A member currently holding PLAYER,
+        # ADMIN or WINNER is never awarded — this is the final guard that keeps
+        # subscribers/staff out even if an old vote row is stale.
+        blocking_roles = {ROLE_PLAYER.upper(), ROLE_ADMIN.upper(), ROLE_WINNER.upper()}
         for user_id in eligible:
             if user_id in active_ids:
+                drop_reasons.append(f"{user_id}: active WINNER grant")
                 continue
             member = guild.get_member(user_id)
             if member is None:
+                drop_reasons.append(f"{user_id}: left/banned")
                 continue  # left or banned — never announce or award
-            if winner_role and winner_role in member.roles:
+            held = {r.name.upper() for r in member.roles} & blocking_roles
+            if held:
+                drop_reasons.append(f"{user_id}: holds {'/'.join(sorted(held))} (not a pure NPC)")
                 continue
             winners.append(user_id)
-        dropped = [uid for uid in eligible if uid not in winners]
-        if dropped:
-            print(f"[scheduler] winners excluded at award (not in guild / active / has role): {dropped}", flush=True)
+        if drop_reasons:
+            print(f"[scheduler] winners excluded at award: {drop_reasons}", flush=True)
 
         try:
             database.save_completed_game(
                 guild.id, week_key, winner_ids=winners, closed_at=now_utc.isoformat()
             )
-            rpt.ok("Winners were calculated and saved", _format_winner_report(report))
+            detail = _format_winner_report(report)
+            if drop_reasons:
+                detail = (detail + "\n\nExcluded at award:\n• " + "\n• ".join(drop_reasons))[:1020]
+            rpt.ok("Winners were calculated and saved", detail)
         except Exception as exc:
             rpt.fail("Winners were calculated and saved", repr(exc))
 
@@ -976,9 +987,10 @@ class SchedulerCog(commands.Cog):
                     granted += 1
                     try:
                         await member.send(_winner_role_dm(now_utc + timedelta(days=7)))
-                    except Exception:
-                        pass
-                except Exception:
+                    except Exception as dm_exc:
+                        print(f"[scheduler] winner DM to {user_id} failed: {dm_exc!r}", flush=True)
+                except Exception as role_exc:
+                    print(f"[scheduler] WINNER role grant to {user_id} failed: {role_exc!r}", flush=True)
                     grant_errors += 1
         if not winner_role:
             rpt.fail("WINNER roles were added to the winners", f"role '{ROLE_WINNER}' not found")

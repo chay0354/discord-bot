@@ -275,7 +275,16 @@ def _vote_limit_for(member: discord.Member) -> int:
 
 
 def _role_snapshot(member: discord.Member) -> str:
+    """Classify a member for vote/winner logic.
+
+    Order matters: ADMIN/PLAYER/WINNER must take precedence over the NPC role
+    (every member also carries NPC), otherwise staff and subscribers would be
+    recorded as ``role_at_vote="NPC"`` and wrongly become win-eligible. Per the
+    contract, **only** a pure NPC (no ADMIN/PLAYER/WINNER) can win.
+    """
     names = {r.name.upper() for r in member.roles}
+    if ROLE_ADMIN.upper() in names:
+        return "ADMIN"
     if ROLE_PLAYER.upper() in names:
         return "PLAYER"
     if ROLE_WINNER.upper() in names:
