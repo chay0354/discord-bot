@@ -912,7 +912,28 @@ class SchedulerCog(commands.Cog):
             guild_member_ids=member_ids,
             player_or_paid_ids=player_or_paid,
         )
-        winners = list(report.get("eligible_winner_ids") or [])
+        eligible = list(report.get("eligible_winner_ids") or [])
+
+        # Final guard: the ANNOUNCED winners must be EXACTLY the ones who will
+        # actually receive the role now. Exclude anyone who already holds an
+        # active WINNER grant or who is no longer in the guild (left/banned), so
+        # the announcement can never name someone who doesn't get the role.
+        winner_role = discord.utils.get(guild.roles, name=ROLE_WINNER)
+        active_ids = database.active_winner_user_ids(guild.id)
+        winners: list[int] = []
+        for user_id in eligible:
+            if user_id in active_ids:
+                continue
+            member = guild.get_member(user_id)
+            if member is None:
+                continue  # left or banned — never announce or award
+            if winner_role and winner_role in member.roles:
+                continue
+            winners.append(user_id)
+        dropped = [uid for uid in eligible if uid not in winners]
+        if dropped:
+            print(f"[scheduler] winners excluded at award (not in guild / active / has role): {dropped}", flush=True)
+
         try:
             database.save_completed_game(
                 guild.id, week_key, winner_ids=winners, closed_at=now_utc.isoformat()
@@ -921,7 +942,7 @@ class SchedulerCog(commands.Cog):
         except Exception as exc:
             rpt.fail("Winners were calculated and saved", repr(exc))
 
-        # 6) Announce winners.
+        # 6) Announce winners (only the validated list that will be awarded).
         try:
             expires_at_utc = now_utc + timedelta(days=7)
             await self._publish_last_game_winners(
@@ -935,37 +956,30 @@ class SchedulerCog(commands.Cog):
         except Exception as exc:
             rpt.fail("Winners were announced successfully", repr(exc))
 
-        # 7) Grant WINNER roles.
-        winner_role = discord.utils.get(guild.roles, name=ROLE_WINNER)
+        # 7) Grant WINNER roles to the same validated list.
         expires_at = (now_utc + timedelta(days=7)).isoformat()
         granted = 0
         grant_errors = 0
         if winners and winner_role:
-            active_ids = database.active_winner_user_ids(guild.id)
             for user_id in winners:
-                if user_id in active_ids:
-                    continue
                 member = guild.get_member(user_id)
                 if not member:
-                    continue
-                if member and winner_role in member.roles:
                     continue
                 try:
                     database.add_winner(guild.id, week_key, user_id, expires_at)
                 except Exception:
                     grant_errors += 1
                     continue
-                if member:
-                    database.upsert_user(user_id, str(member.display_name or member.name))
+                database.upsert_user(user_id, str(member.display_name or member.name))
+                try:
+                    await member.add_roles(winner_role, reason="Weekly stock game winner")
+                    granted += 1
                     try:
-                        await member.add_roles(winner_role, reason="Weekly stock game winner")
-                        granted += 1
-                        try:
-                            await member.send(_winner_role_dm(now_utc + timedelta(days=7)))
-                        except Exception:
-                            pass
+                        await member.send(_winner_role_dm(now_utc + timedelta(days=7)))
                     except Exception:
-                        grant_errors += 1
+                        pass
+                except Exception:
+                    grant_errors += 1
         if not winner_role:
             rpt.fail("WINNER roles were added to the winners", f"role '{ROLE_WINNER}' not found")
         else:
