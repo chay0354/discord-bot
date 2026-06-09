@@ -84,11 +84,30 @@ def init_db() -> None:
     _request("GET", "completed_games", query="?select=id&limit=1")
 
 
-def reset_week_game_data(guild_id: int, week_key: str) -> None:
-    """Clear selected tickers and votes for a weekly game restart."""
+def revoke_winner_grants_for_week(guild_id: int, week_key: str) -> list[int]:
+    """Revoke active winner grants for a week (admin reset). Returns affected user ids."""
+    rows = _select(
+        "winners",
+        (
+            f"?select=id,user_id&guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
+            f"&removed_at=is.null"
+        ),
+    )
+    user_ids: list[int] = []
+    for row in rows:
+        mark_winner_removed(int(row["id"]))
+        uid = int(row["user_id"])
+        if uid not in user_ids:
+            user_ids.append(uid)
+    return user_ids
+
+
+def reset_week_game_data(guild_id: int, week_key: str) -> list[int]:
+    """Clear votes, picks, and winner grants for a weekly game restart."""
     query = f"?guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
     _request("DELETE", "votes", query=query)
     _request("DELETE", "ticker_picks", query=query)
+    return revoke_winner_grants_for_week(guild_id, week_key)
 
 
 def winning_stocks_for_week(guild_id: int, week_key: str) -> dict[str, list[dict[str, Any]]]:

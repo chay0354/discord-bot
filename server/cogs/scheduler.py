@@ -815,7 +815,13 @@ class SchedulerCog(commands.Cog):
             if str(cycle.get("status") or "") == "closed":
                 week_key = database.next_week_key_for(now_utc)
         database.ensure_cycle(guild.id, week_key)
-        database.reset_week_game_data(guild.id, week_key)
+        revoked_winner_ids = database.reset_week_game_data(guild.id, week_key)
+        if revoked_winner_ids:
+            await self._revoke_winner_roles_for_users(
+                guild,
+                revoked_winner_ids,
+                reason="Week reset — prior winner grant revoked",
+            )
         reset_picker_runtime_state()
         clear_vote_runtime_state()
         disarm_early_window()
@@ -889,6 +895,40 @@ class SchedulerCog(commands.Cog):
             discord.Color.blurple(),
         )
         return week_key
+
+    async def _revoke_winner_roles_for_users(
+        self,
+        guild: discord.Guild,
+        user_ids: list[int],
+        *,
+        reason: str,
+    ) -> int:
+        """Remove WINNER and restore NPC after a week reset revokes prior grants."""
+        winner_role = discord.utils.get(guild.roles, name=ROLE_WINNER)
+        if not winner_role or not user_ids:
+            return 0
+        npc_role = discord.utils.get(guild.roles, name=ROLE_NPC)
+        player_role = discord.utils.get(guild.roles, name=ROLE_PLAYER)
+        removed = 0
+        for user_id in user_ids:
+            member = guild.get_member(user_id)
+            if not member or winner_role not in member.roles:
+                continue
+            try:
+                await member.remove_roles(winner_role, reason=reason)
+                removed += 1
+                if (
+                    npc_role
+                    and npc_role not in member.roles
+                    and (not player_role or player_role not in member.roles)
+                ):
+                    try:
+                        await member.add_roles(npc_role, reason=f"{reason} — restored NPC")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return removed
 
     async def _expire_winners(self, guild: discord.Guild) -> int:
         role = discord.utils.get(guild.roles, name=ROLE_WINNER)
