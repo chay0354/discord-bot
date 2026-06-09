@@ -42,11 +42,9 @@ from config import (
     CHANNEL_FINAL_LEADERBOARD,
     CHANNEL_MANAGE_SUBSCRIPTION,
     CHANNEL_PICK_RESULTS,
-    CHANNEL_RULES,
     CHANNEL_SUBSCRIBE,
     CHANNEL_WINNERS,
     MANAGE_SUBSCRIPTION_CHANNEL_CANDIDATES,
-    RULES_CHANNEL_CANDIDATES,
     SUBSCRIBE_CHANNEL_CANDIDATES,
     ROLE_ADMIN,
     ROLE_NPC,
@@ -132,38 +130,9 @@ def role_id(roles: list[dict], name: str) -> str | None:
     return None
 
 
-def role_gated_view_overwrites(roles: list[dict], guild_id: str) -> list[dict]:
-    """@everyone hidden; NPC/PLAYER/WINNER view; ADMIN view+send."""
-    everyone_id = guild_id
-    npc = role_id(roles, ROLE_NPC)
-    player = role_id(roles, ROLE_PLAYER)
-    winner = role_id(roles, ROLE_WINNER)
-    admin = role_id(roles, ROLE_ADMIN)
-
-    view_only = P_VIEW_CHANNEL | P_READ_MESSAGE_HISTORY
-    admin_full = (
-        P_VIEW_CHANNEL
-        | P_READ_MESSAGE_HISTORY
-        | P_SEND_MESSAGES
-        | P_EMBED_LINKS
-        | P_ATTACH_FILES
-        | P_USE_EXTERNAL_EMOJIS
-    )
-
-    out = [
-        {"id": everyone_id, "type": 0, "allow": "0", "deny": str(P_VIEW_CHANNEL)},
-    ]
-    for rid in (npc, player, winner):
-        if rid:
-            out.append({"id": rid, "type": 0, "allow": str(view_only), "deny": str(P_SEND_MESSAGES)})
-    if admin:
-        out.append({"id": admin, "type": 0, "allow": str(admin_full), "deny": "0"})
-    return out
-
-
-def entry_view_overwrites(roles: list[dict], guild_id: str) -> list[dict]:
-    """Subscribe/onboarding: @everyone can view (read-only)."""
-    everyone_id = guild_id
+def public_view_overwrites(roles: list[dict], guild_id: str) -> list[dict]:
+    """@everyone view; NPC/PLAYER/WINNER view; ADMIN view+send."""
+    everyone_id = guild_id  # @everyone role id equals guild id
     npc = role_id(roles, ROLE_NPC)
     player = role_id(roles, ROLE_PLAYER)
     winner = role_id(roles, ROLE_WINNER)
@@ -240,7 +209,7 @@ def main() -> int:
         print(f"[WARN] No channel named exactly {CHANNEL_FINAL_LEADERBOARD!r}; skipping.")
     else:
         print(f"Channel: #{target['name']} (id={target['id']})")
-        new_ow = entry_view_overwrites(roles, GUILD_ID)
+        new_ow = public_view_overwrites(roles, GUILD_ID)
         if APPLY:
             patch_channel(target["id"], {"permission_overwrites": new_ow})
             print("  -> updated overwrites: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
@@ -253,32 +222,14 @@ def main() -> int:
         print(f"[WARN] No channel named exactly {CHANNEL_WINNERS!r}; skipping.")
     else:
         print(f"Channel: #{target['name']} (id={target['id']})")
-        new_ow = entry_view_overwrites(roles, GUILD_ID)
+        new_ow = public_view_overwrites(roles, GUILD_ID)
         if APPLY:
             patch_channel(target["id"], {"permission_overwrites": new_ow})
             print("  -> updated overwrites: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
         else:
             print("  would update overwrites to: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
 
-    print("\n--- Fix 3: Rules channel ---")
-    found_rules: dict | None = None
-    for name in RULES_CHANNEL_CANDIDATES:
-        c = find_channel_by_exact_name(channels, name)
-        if c:
-            found_rules = c
-            break
-    if not found_rules:
-        print(f"[WARN] No rules channel found. Looked for: {', '.join(RULES_CHANNEL_CANDIDATES)}")
-    else:
-        print(f"Channel: #{found_rules['name']} (id={found_rules['id']})")
-        new_ow = role_gated_view_overwrites(roles, GUILD_ID)
-        if APPLY:
-            patch_channel(found_rules["id"], {"permission_overwrites": new_ow})
-            print("  -> updated overwrites: @everyone hidden, NPC/PLAYER/WINNER view, ADMIN view+send")
-        else:
-            print("  would update overwrites to: @everyone hidden, NPC/PLAYER/WINNER view, ADMIN view+send")
-
-    print("\n--- Fix 4: pick-results channel ---")
+    print("\n--- Fix 3: pick-results channel ---")
     target = find_channel_by_exact_name(channels, CHANNEL_PICK_RESULTS)
     if target:
         print(f"Channel: #{target['name']} (id={target['id']})")
@@ -289,7 +240,7 @@ def main() -> int:
         else:
             print("  would update overwrites to: @everyone hidden, PLAYER/WINNER view, ADMIN view+send")
 
-    print("\n--- Fix 5: Subscribe to PLAYER channel ---")
+    print("\n--- Fix 4: Subscribe to PLAYER channel ---")
     found_subscribe: dict | None = None
     for name in SUBSCRIBE_CHANNEL_CANDIDATES:
         c = find_channel_by_exact_name(channels, name)
@@ -302,18 +253,18 @@ def main() -> int:
             print(f"  would create #{CHANNEL_SUBSCRIBE} only if no similar channel exists")
     else:
         print(f"Channel: #{found_subscribe['name']} (id={found_subscribe['id']})")
-        new_ow = entry_view_overwrites(roles, GUILD_ID)
+        new_ow = public_view_overwrites(roles, GUILD_ID)
         if APPLY:
             patch_channel(found_subscribe["id"], {"permission_overwrites": new_ow})
-            print("  -> updated overwrites: @everyone view (entry), NPC/PLAYER/WINNER view, ADMIN view+send")
+            print("  -> updated overwrites: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
         else:
-            print("  would update overwrites to: @everyone view (entry), NPC/PLAYER/WINNER view, ADMIN view+send")
+            print("  would update overwrites to: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
 
     subscribe_category_id: str | None = None
     if found_subscribe and found_subscribe.get("parent_id"):
         subscribe_category_id = str(found_subscribe["parent_id"])
 
-    print("\n--- Fix 6: Manage subscription channel ---")
+    print("\n--- Fix 5: Manage subscription channel ---")
     found_manage: dict | None = None
     for name in MANAGE_SUBSCRIPTION_CHANNEL_CANDIDATES:
         c = find_channel_by_exact_name(channels, name)
@@ -322,7 +273,7 @@ def main() -> int:
             break
     if found_manage:
         print(f"Channel: #{found_manage['name']} (id={found_manage['id']})")
-        new_ow = entry_view_overwrites(roles, GUILD_ID)
+        new_ow = public_view_overwrites(roles, GUILD_ID)
         manage_parent = found_manage.get("parent_id")
         needs_category = (
             subscribe_category_id
@@ -359,7 +310,7 @@ def main() -> int:
             payload = {
                 "name": CHANNEL_MANAGE_SUBSCRIPTION,
                 "type": 0,
-                "permission_overwrites": entry_view_overwrites(roles, GUILD_ID),
+                "permission_overwrites": public_view_overwrites(roles, GUILD_ID),
                 "topic": "Manage your PLAYER subscription via Stripe billing portal.",
             }
             if subscribe_category_id:

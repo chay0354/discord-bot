@@ -13,11 +13,9 @@ if str(ROOT) not in sys.path:
 from dotenv import load_dotenv
 
 load_dotenv(ROOT / ".env")
-load_dotenv(ROOT.parent / ".env")
 
 import discord
 
-from channel_permissions import entry_view_overwrites, role_gated_view_overwrites
 from config import (
     CHANNEL_ADMIN_ACTIONS,
     CHANNEL_BLUE_LIVE,
@@ -29,14 +27,12 @@ from config import (
     CHANNEL_MID_VOTE,
     CHANNEL_MOD,
     CHANNEL_PICK_RESULTS,
-    CHANNEL_RULES,
     CHANNEL_SMALL_LIVE,
     CHANNEL_SMALL_TICKER,
     CHANNEL_SMALL_VOTE,
     CHANNEL_WINNERS,
     CHANNEL_SUBSCRIBE,
     CHANNEL_MANAGE_SUBSCRIPTION,
-    RULES_CHANNEL_CANDIDATES,
     SUBSCRIBE_CHANNEL_CANDIDATES,
     ROLE_ADMIN,
     ROLE_NPC,
@@ -133,11 +129,15 @@ class PermissionEnsurer(discord.Client):
 
             everyone = guild.default_role
 
-            def role_gated() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
-                return role_gated_view_overwrites(guild, npc_role, player_role, winner_role, admin_role, me)
-
-            def entry_public() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
-                return entry_view_overwrites(guild, npc_role, player_role, winner_role, admin_role, me)
+            def public_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
+                return {
+                    everyone: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                    npc_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                    player_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                    winner_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                    admin_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+                    me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, read_message_history=True, embed_links=True),
+                }
 
             def subscriber_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
                 return {
@@ -167,25 +167,17 @@ class PermissionEnsurer(discord.Client):
                 CHANNEL_SMALL_LIVE: subscriber_overwrites(),
                 CHANNEL_MID_LIVE: subscriber_overwrites(),
                 CHANNEL_BLUE_LIVE: subscriber_overwrites(),
-                CHANNEL_RULES: role_gated(),
-                CHANNEL_SMALL_VOTE: role_gated(),
-                CHANNEL_MID_VOTE: role_gated(),
-                CHANNEL_BLUE_VOTE: role_gated(),
+                CHANNEL_SMALL_VOTE: public_overwrites(),
+                CHANNEL_MID_VOTE: public_overwrites(),
+                CHANNEL_BLUE_VOTE: public_overwrites(),
                 CHANNEL_MOD: mod_overwrites(),
                 CHANNEL_ADMIN_ACTIONS: mod_overwrites(),
-                CHANNEL_FINAL_LEADERBOARD: entry_public(),
-                CHANNEL_WINNERS: entry_public(),
-                CHANNEL_MANAGE_SUBSCRIPTION: entry_public(),
+                CHANNEL_FINAL_LEADERBOARD: public_overwrites(),
+                CHANNEL_WINNERS: public_overwrites(),
+                CHANNEL_MANAGE_SUBSCRIPTION: public_overwrites(),
             }
             for name, overwrites in channel_specs.items():
                 await _ensure_channel(guild, name, overwrites)
-
-            for name in RULES_CHANNEL_CANDIDATES:
-                rules_ch = _find_channel(guild, name)
-                if rules_ch:
-                    await rules_ch.edit(overwrites=role_gated(), reason="Stock bot permission verification")
-                    print(f"[UPDATE] #{rules_ch.name} (rules)", flush=True)
-                    break
 
             subscribe_ch = None
             for name in SUBSCRIBE_CHANNEL_CANDIDATES:
@@ -193,10 +185,10 @@ class PermissionEnsurer(discord.Client):
                 if subscribe_ch:
                     break
             if subscribe_ch:
-                await subscribe_ch.edit(overwrites=entry_public(), reason="Stock bot permission verification")
+                await subscribe_ch.edit(overwrites=public_overwrites(), reason="Stock bot permission verification")
                 print(f"[UPDATE] #{subscribe_ch.name} (subscribe)", flush=True)
             else:
-                await _ensure_channel(guild, CHANNEL_SUBSCRIBE, entry_public())
+                await _ensure_channel(guild, CHANNEL_SUBSCRIBE, public_overwrites())
         await self.close()
 
 

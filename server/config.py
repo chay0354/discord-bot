@@ -28,29 +28,6 @@ CHANNEL_BLUE_LIVE = "large-cap-live"
 
 CHANNEL_MOD = "mod"
 CHANNEL_ADMIN_ACTIONS = "admin-actions"
-# Server rules — hidden from @everyone until a game role is assigned
-CHANNEL_RULES = os.getenv("RULES_CHANNEL", "𝖱𝖴𝖫𝖤𝖲📜")
-RULES_CHANNEL_CANDIDATES = tuple(
-    dict.fromkeys(
-        n.strip()
-        for n in os.getenv("RULES_CHANNEL_CANDIDATES", f"rules,{CHANNEL_RULES}").split(",")
-        if n.strip()
-    )
-)
-# Welcome/verify channel — visible to everyone; holds the "react to get NPC" gate
-CHANNEL_WELCOME = os.getenv("WELCOME_CHANNEL", "𝙒𝙃𝙀𝙍𝙀-𝘼𝙈-𝙄⁉️")
-WELCOME_CHANNEL_CANDIDATES = tuple(
-    dict.fromkeys(
-        n.strip()
-        for n in os.getenv(
-            "WELCOME_CHANNEL_CANDIDATES",
-            f"welcome,verify,start-here,where-am-i,{CHANNEL_WELCOME}",
-        ).split(",")
-        if n.strip()
-    )
-)
-# Emoji a new member reacts with to receive the NPC role
-NPC_GATE_EMOJI = os.getenv("NPC_GATE_EMOJI", "✅")
 # Subscribe (new PLAYER checkout) — first matching channel name in guild wins
 CHANNEL_SUBSCRIBE = os.getenv("SUBSCRIBE_CHANNEL", "subscribe")
 SUBSCRIBE_CHANNEL_CANDIDATES = tuple(

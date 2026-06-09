@@ -12,14 +12,12 @@ import discord
 from discord.ext import commands
 
 import database
-from channel_permissions import entry_view_overwrites, role_gated_view_overwrites
 from config import (
     CHANNEL_BLUE_LIVE,
     CHANNEL_BLUE_TICKER,
     CHANNEL_BLUE_VOTE,
     CHANNEL_ADMIN_ACTIONS,
     CHANNEL_MANAGE_SUBSCRIPTION,
-    CHANNEL_RULES,
     CHANNEL_SUBSCRIBE,
     CHANNEL_FINAL_LEADERBOARD,
     CHANNEL_MID_LIVE,
@@ -31,7 +29,6 @@ from config import (
     CHANNEL_SMALL_TICKER,
     CHANNEL_SMALL_VOTE,
     CHANNEL_WINNERS,
-    RULES_CHANNEL_CANDIDATES,
     ROLE_ADMIN,
     ROLE_NPC,
     ROLE_PLAYER,
@@ -49,7 +46,6 @@ PROGRESS_EVERY = 100       # print progress to console every N deletions
 class AdminToolsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._perms_synced = False
 
     def _find_channel(self, guild: discord.Guild, name: str) -> discord.TextChannel | None:
         for channel in guild.text_channels:
@@ -90,58 +86,6 @@ class AdminToolsCog(commands.Cog):
             reason="Stock bot infrastructure setup",
         )
         return channel, True
-
-    async def _resolve_roles(
-        self, guild: discord.Guild
-    ) -> tuple[discord.Role, discord.Role, discord.Role, discord.Role] | None:
-        npc = discord.utils.get(guild.roles, name=ROLE_NPC)
-        player = discord.utils.get(guild.roles, name=ROLE_PLAYER)
-        winner = discord.utils.get(guild.roles, name=ROLE_WINNER)
-        admin = discord.utils.get(guild.roles, name=ROLE_ADMIN)
-        if not all((npc, player, winner, admin)):
-            return None
-        return npc, player, winner, admin
-
-    async def _sync_role_gated_permissions(self, guild: discord.Guild) -> None:
-        """Keep the rules + vote channels hidden from @everyone (roleless members).
-
-        Other channels keep their existing visibility; we don't touch them here.
-        """
-        me = guild.me
-        if not me or not me.guild_permissions.manage_channels:
-            return
-        roles = await self._resolve_roles(guild)
-        if not roles:
-            return
-        npc, player, winner, admin = roles
-        gated = role_gated_view_overwrites(guild, npc, player, winner, admin, me)
-
-        gated_names = {
-            CHANNEL_RULES,
-            CHANNEL_SMALL_VOTE,
-            CHANNEL_MID_VOTE,
-            CHANNEL_BLUE_VOTE,
-            *RULES_CHANNEL_CANDIDATES,
-        }
-        for name in gated_names:
-            channel = self._find_channel(guild, name)
-            if not channel:
-                continue
-            try:
-                await channel.edit(overwrites=gated, reason="Hide rules channel from roleless members")
-            except (discord.Forbidden, discord.HTTPException) as exc:
-                print(f"[admin_tools] could not sync #{channel.name}: {exc!r}", flush=True)
-
-    @commands.Cog.listener()
-    async def on_ready(self) -> None:
-        if self._perms_synced:
-            return
-        self._perms_synced = True
-        for guild in self.bot.guilds:
-            try:
-                await self._sync_role_gated_permissions(guild)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[admin_tools] permission sync failed for {guild.id}: {exc!r}", flush=True)
 
     @commands.command(name="setup_infrastructure")
     @commands.has_role("ADMIN")
@@ -193,11 +137,15 @@ class AdminToolsCog(commands.Cog):
         everyone = guild.default_role
         bot_member = guild.me
 
-        def role_gated() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
-            return role_gated_view_overwrites(guild, npc_role, player_role, winner_role, admin_role, bot_member)
-
-        def entry_public() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
-            return entry_view_overwrites(guild, npc_role, player_role, winner_role, admin_role, bot_member)
+        def public_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
+            return {
+                everyone: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                npc_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                player_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                winner_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                admin_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+                bot_member: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, read_message_history=True),
+            }
 
         def subscriber_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
             return {
@@ -226,19 +174,18 @@ class AdminToolsCog(commands.Cog):
             CHANNEL_MID_TICKER: subscriber_overwrites(),
             CHANNEL_BLUE_TICKER: subscriber_overwrites(),
             CHANNEL_PICK_RESULTS: subscriber_overwrites(),
-            CHANNEL_RULES: role_gated(),
-            CHANNEL_SMALL_VOTE: role_gated(),
-            CHANNEL_MID_VOTE: role_gated(),
-            CHANNEL_BLUE_VOTE: role_gated(),
+            CHANNEL_SMALL_VOTE: public_overwrites(),
+            CHANNEL_MID_VOTE: public_overwrites(),
+            CHANNEL_BLUE_VOTE: public_overwrites(),
             CHANNEL_SMALL_LIVE: subscriber_overwrites(),
             CHANNEL_MID_LIVE: subscriber_overwrites(),
             CHANNEL_BLUE_LIVE: subscriber_overwrites(),
             CHANNEL_MOD: mod_overwrites(),
             CHANNEL_ADMIN_ACTIONS: mod_overwrites(),
-            CHANNEL_SUBSCRIBE: entry_public(),
-            CHANNEL_MANAGE_SUBSCRIPTION: entry_public(),
-            CHANNEL_FINAL_LEADERBOARD: entry_public(),
-            CHANNEL_WINNERS: entry_public(),
+            CHANNEL_SUBSCRIBE: public_overwrites(),
+            CHANNEL_MANAGE_SUBSCRIPTION: public_overwrites(),
+            CHANNEL_FINAL_LEADERBOARD: public_overwrites(),
+            CHANNEL_WINNERS: public_overwrites(),
         }
 
         for name, overwrites in channel_specs.items():
