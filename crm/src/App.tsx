@@ -21,6 +21,11 @@ const ACTIONS: { id: string; label: string; hint: string }[] = [
     label: "Start vote",
     hint: "Close pre-vote and open the live vote stage with the current ballot.",
   },
+  {
+    id: "reset_winner_grants",
+    label: "Reset WINNER grants",
+    hint: "Manual testing only. Normally WINNER lasts until next Friday close — use this when you want to clear it early.",
+  },
 ];
 
 type LbRow = {

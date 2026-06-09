@@ -84,17 +84,10 @@ def init_db() -> None:
     _request("GET", "completed_games", query="?select=id&limit=1")
 
 
-def revoke_winner_grants_for_week(guild_id: int, week_key: str) -> list[int]:
-    """Revoke active winner grants for a week (admin reset). Returns affected user ids."""
-    rows = _select(
-        "winners",
-        (
-            f"?select=id,user_id&guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
-            f"&removed_at=is.null"
-        ),
-    )
+def revoke_all_active_winner_grants(guild_id: int) -> list[int]:
+    """Revoke every active winner grant (manual admin reset only). Returns affected user ids."""
     user_ids: list[int] = []
-    for row in rows:
+    for row in active_winner_grants(guild_id):
         mark_winner_removed(int(row["id"]))
         uid = int(row["user_id"])
         if uid not in user_ids:
@@ -102,12 +95,15 @@ def revoke_winner_grants_for_week(guild_id: int, week_key: str) -> list[int]:
     return user_ids
 
 
-def reset_week_game_data(guild_id: int, week_key: str) -> list[int]:
-    """Clear votes, picks, and winner grants for a weekly game restart."""
+def reset_week_game_data(guild_id: int, week_key: str) -> None:
+    """Clear selected tickers and votes for a weekly game restart.
+
+    Does not touch winner grants — per contract the WINNER role runs Friday→Friday
+    and survives Monday's new game open until the stored ``expires_at``.
+    """
     query = f"?guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
     _request("DELETE", "votes", query=query)
     _request("DELETE", "ticker_picks", query=query)
-    return revoke_winner_grants_for_week(guild_id, week_key)
 
 
 def winning_stocks_for_week(guild_id: int, week_key: str) -> dict[str, list[dict[str, Any]]]:

@@ -815,13 +815,7 @@ class SchedulerCog(commands.Cog):
             if str(cycle.get("status") or "") == "closed":
                 week_key = database.next_week_key_for(now_utc)
         database.ensure_cycle(guild.id, week_key)
-        revoked_winner_ids = database.reset_week_game_data(guild.id, week_key)
-        if revoked_winner_ids:
-            await self._revoke_winner_roles_for_users(
-                guild,
-                revoked_winner_ids,
-                reason="Week reset — prior winner grant revoked",
-            )
+        database.reset_week_game_data(guild.id, week_key)
         reset_picker_runtime_state()
         clear_vote_runtime_state()
         disarm_early_window()

@@ -121,6 +121,38 @@ async def run_action(
         database.log_event(target.id, "end_competition", {"actor_id": actor_id})
         return {"ok": True, "message": "Vote stage ended."}
 
+    if action in ("reset_winner_grants", "reset_winner"):
+        revoked_ids = database.revoke_all_active_winner_grants(target.id)
+        roles_removed = await scheduler._revoke_winner_roles_for_users(
+            target,
+            revoked_ids,
+            reason="Manual admin reset of WINNER grants",
+        )
+        database.log_event(
+            target.id,
+            "reset_winner_grants",
+            {
+                "actor_id": actor_id,
+                "grants_revoked": len(revoked_ids),
+                "roles_removed": roles_removed,
+                "user_ids": revoked_ids,
+            },
+        )
+        if not revoked_ids:
+            return {
+                "ok": True,
+                "message": "No active WINNER grants to reset.",
+            }
+        mentions = ", ".join(f"<@{uid}>" for uid in revoked_ids)
+        return {
+            "ok": True,
+            "message": (
+                f"Revoked {len(revoked_ids)} active WINNER grant(s) and removed "
+                f"{roles_removed} Discord role(s): {mentions}. "
+                "Normal expiry remains Friday close → next Friday close."
+            ),
+        }
+
     raise ValueError(f"Unknown action: {action}")
 
 
