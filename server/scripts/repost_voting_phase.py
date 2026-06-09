@@ -48,7 +48,7 @@ class VotingPhaseReposter(commands.Bot):
             return
 
         for guild in self.guilds:
-            updated, counts = await scheduler._monday_open_one_guild(guild)
+            updated, counts = await scheduler._monday_open_one_guild(guild, manual=True)
             print(
                 f"Reposted voting phase in {guild.name}: updated={updated}, selected_context_counts={counts}",
                 flush=True,

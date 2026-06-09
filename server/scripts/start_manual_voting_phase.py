@@ -127,7 +127,7 @@ class ManualVotingBot(commands.Bot):
                 if n != TICKER_LIMIT_PER_CATEGORY:
                     print(f"WARNING: {cat} has {n} tickers, expected {TICKER_LIMIT_PER_CATEGORY}", flush=True)
 
-            updated, counts = await scheduler._monday_open_one_guild(guild)
+            updated, counts = await scheduler._monday_open_one_guild(guild, manual=True)
             database.log_event(
                 guild.id,
                 "manual_seeded_voting_phase",

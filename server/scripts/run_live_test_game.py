@@ -118,7 +118,7 @@ class LiveTestGameBot(commands.Bot):
                 return
 
             print("Posting voting messages...", flush=True)
-            updated, counts = await self.scheduler_helper._monday_open_one_guild(guild)
+            updated, counts = await self.scheduler_helper._monday_open_one_guild(guild, manual=True)
             close_utc = _next_friday_close_utc(now_utc)
             print(f"Live test game started. Weekly channels updated: {updated}; counts={counts}", flush=True)
             print(f"Scheduled test close at {close_utc:%Y-%m-%d %H:%M:%S} UTC", flush=True)

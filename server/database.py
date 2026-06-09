@@ -242,6 +242,7 @@ def set_cycle_phase(
     monday_open_at: str | None = None,
     early_window_end_at: str | None = None,
     friday_close_at: str | None = None,
+    clear_voting_schedule: bool = False,
 ) -> None:
     ensure_cycle(guild_id, week_key)
     payload: dict[str, Any] = {
@@ -250,17 +251,41 @@ def set_cycle_phase(
         "voting_open": voting_open,
         "early_window_open": early_window_open,
     }
-    if monday_open_at:
+    if clear_voting_schedule:
+        payload["monday_open_at"] = None
+        payload["early_window_end_at"] = None
+    if monday_open_at is not None:
         payload["monday_open_at"] = monday_open_at
-    if early_window_end_at:
+    if early_window_end_at is not None:
         payload["early_window_end_at"] = early_window_end_at
-    if friday_close_at:
+    if friday_close_at is not None:
         payload["friday_close_at"] = friday_close_at
     _request("PATCH", "game_cycles", query=f"?guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}", json_body=payload)
 
 
+def open_ticker_selection_week_key(guild_id: int) -> str | None:
+    """Week key for the guild's currently open pre-vote cycle, if any."""
+    row = _single(
+        "game_cycles",
+        f"?select=week_key&guild_id=eq.{guild_id}&ticker_selection_open=eq.true&limit=1",
+    )
+    if row and row.get("week_key"):
+        return str(row["week_key"])
+    return None
+
+
+def ticker_selection_week_key_for_guild(guild_id: int) -> str:
+    """Resolve the active pre-vote week (DB cycle first, then calendar heuristic)."""
+    open_key = open_ticker_selection_week_key(guild_id)
+    if open_key:
+        return open_key
+    return ticker_selection_week_key_for()
+
+
 def is_ticker_selection_open(guild_id: int, week_key: str | None = None) -> bool:
-    return bool(ensure_cycle(guild_id, week_key)["ticker_selection_open"])
+    if week_key is not None:
+        return bool(ensure_cycle(guild_id, week_key)["ticker_selection_open"])
+    return open_ticker_selection_week_key(guild_id) is not None
 
 
 def is_voting_open(guild_id: int, week_key: str | None = None) -> bool:

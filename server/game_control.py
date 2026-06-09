@@ -79,20 +79,26 @@ async def run_action(
             await scheduler._friday_close_one_guild(target)
         elif status != "closed":
             await scheduler._friday_close_one_guild(target)
-        await scheduler._restart_pre_voting_one_guild(target, actor_id=actor_id)
-        next_week = database.ticker_selection_week_key_for()
+        selection_week = await scheduler._restart_pre_voting_one_guild(
+            target, actor_id=actor_id, manual=True
+        )
         database.log_event(
             target.id,
             "start_pre_vote",
-            {"ended_week": week_key, "pre_vote_week": next_week, "actor_id": actor_id},
+            {
+                "ended_week": week_key,
+                "pre_vote_week": selection_week,
+                "actor_id": actor_id,
+                "manual": True,
+            },
         )
         return {
             "ok": True,
-            "message": f"Week {week_key} ended. Pre-vote opened for {next_week}.",
+            "message": f"Week {week_key} ended. Pre-vote opened for {selection_week} (timer starts now).",
         }
 
     if action in ("start_vote", "start_voting", "end_pre_start_voting"):
-        updated, counts = await scheduler._monday_open_one_guild(target)
+        updated, counts = await scheduler._monday_open_one_guild(target, manual=True)
         database.log_event(
             target.id,
             "start_vote",
@@ -121,7 +127,7 @@ async def run_action(
 def get_game_status() -> dict[str, Any]:
     gid = _guild_id()
     week_key = database.week_key_for()
-    selection_week = database.ticker_selection_week_key_for()
+    selection_week = database.ticker_selection_week_key_for_guild(gid)
     cycle = database.ensure_cycle(gid, week_key)
     tickers = database.list_tickers(gid, week_key)
     counts = {cat: len(tickers[cat]) for cat in CATEGORIES}

@@ -464,14 +464,27 @@ class SchedulerCog(commands.Cog):
 
     # ---------------- Core Monday-open operation ----------------
 
-    async def _monday_open_one_guild(self, guild: discord.Guild) -> Tuple[int, List[int]]:
+    async def _monday_open_one_guild(
+        self,
+        guild: discord.Guild,
+        *,
+        manual: bool = False,
+    ) -> Tuple[int, List[int]]:
         """
-        Executes Monday 09:00 ET flow for a single guild.
+        Opens the voting stage for a single guild.
+
+        Scheduled automation anchors the 24h early window to Monday 09:00 ET.
+        Manual admin starts anchor the window to the moment the button is pressed.
         Returns (updated_weekly_count, per_category_counts).
         """
         now_utc = _now_utc()
         week_key = database.week_key_for(now_utc)
-        rpt = StepReport(f"Monday Open — Week {week_key} ({_format_et(now_utc)})")
+        title = (
+            f"Vote Start (Manual) — Week {week_key} ({_format_et(now_utc)})"
+            if manual
+            else f"Monday Open — Week {week_key} ({_format_et(now_utc)})"
+        )
+        rpt = StepReport(title)
 
         # Remove any expired WINNER grants before opening a new voting week.
         try:
@@ -480,12 +493,16 @@ class SchedulerCog(commands.Cog):
         except Exception as exc:
             rpt.fail("Expired WINNER roles removed", repr(exc))
 
-        # 1) Arm Early Window — anchored to Monday 09:00 ET → Tuesday 09:00 ET (spec).
-        start_utc = _monday_9am_et_for_week(now_utc)
-        start_et = _to_et(start_utc)
-        end_utc = _from_et_local_to_utc(
-            datetime.combine(start_et.date() + timedelta(days=1), dtime(9, 0))
-        )
+        # 1) Arm Early Window — 24h from manual press, or Monday 09:00 ET → Tuesday 09:00 ET.
+        if manual:
+            start_utc = now_utc
+            end_utc = now_utc + timedelta(hours=24)
+        else:
+            start_utc = _monday_9am_et_for_week(now_utc)
+            start_et = _to_et(start_utc)
+            end_utc = _from_et_local_to_utc(
+                datetime.combine(start_et.date() + timedelta(days=1), dtime(9, 0))
+            )
         arm_early_window(start_utc)
         try:
             database.set_cycle_phase(
@@ -498,9 +515,14 @@ class SchedulerCog(commands.Cog):
                 monday_open_at=start_utc.isoformat(),
                 early_window_end_at=end_utc.isoformat(),
             )
+            window_detail = (
+                f"24h window from now — ends {_format_et(end_utc)}"
+                if manual
+                else f"early window ends {_format_et(end_utc)}"
+            )
             rpt.ok(
                 "Voting window opened (24h early window armed)",
-                f"early window ends {_format_et(end_utc)}" if end_utc else "",
+                window_detail if end_utc else "",
             )
         except Exception as exc:
             rpt.fail("Voting window opened (24h early window armed)", repr(exc))
@@ -704,9 +726,14 @@ class SchedulerCog(commands.Cog):
         for guild in list(self.bot.guilds):
             await self._tuesday_early_close_one_guild(guild)
 
-    async def _reopen_ticker_channels(self, guild: discord.Guild) -> dict[str, int]:
+    async def _reopen_ticker_channels(
+        self,
+        guild: discord.Guild,
+        *,
+        selection_week_key: str | None = None,
+    ) -> dict[str, int]:
         """Reopen the CHOOSE YOUR TICKER channels. Returns verifiable counts."""
-        next_week_key = database.ticker_selection_week_key_for(_now_utc())
+        next_week_key = selection_week_key or database.ticker_selection_week_key_for(_now_utc())
         database.ensure_cycle(guild.id, next_week_key)
         database.set_cycle_phase(
             guild.id,
@@ -745,16 +772,26 @@ class SchedulerCog(commands.Cog):
                 pass
         return result
 
-    async def _restart_pre_voting_one_guild(self, guild: discord.Guild, actor_id: int | None = None) -> None:
+    async def _restart_pre_voting_one_guild(
+        self,
+        guild: discord.Guild,
+        actor_id: int | None = None,
+        *,
+        manual: bool = False,
+    ) -> str:
+        """Restart pre-vote ticker selection. Returns the active selection ``week_key``."""
         now_utc = _now_utc()
-        week_key = database.ticker_selection_week_key_for(now_utc)
+        if manual:
+            week_key = database.week_key_for(now_utc)
+        else:
+            week_key = database.ticker_selection_week_key_for(now_utc)
+            cycle = database.ensure_cycle(guild.id, week_key)
+            if str(cycle.get("status") or "") == "closed":
+                week_key = database.next_week_key_for(now_utc)
         database.ensure_cycle(guild.id, week_key)
-        cycle = database.ensure_cycle(guild.id, week_key)
-        if str(cycle.get("status") or "") == "closed":
-            week_key = database.next_week_key_for(now_utc)
-            database.ensure_cycle(guild.id, week_key)
         database.reset_week_game_data(guild.id, week_key)
         reset_picker_runtime_state()
+        disarm_early_window()
         database.set_cycle_phase(
             guild.id,
             week_key,
@@ -762,6 +799,7 @@ class SchedulerCog(commands.Cog):
             ticker_selection_open=True,
             voting_open=False,
             early_window_open=False,
+            clear_voting_schedule=True,
         )
 
         stopped = discord.Embed(
@@ -807,18 +845,23 @@ class SchedulerCog(commands.Cog):
                 emb.add_field(name=f"{CATEGORY_TITLES['blue']} (0/{TICKER_LIMIT_PER_CATEGORY})", value="—", inline=False)
                 await pr_ch.send(embed=emb)
 
-        await self._reopen_ticker_channels(guild)
+        await self._reopen_ticker_channels(guild, selection_week_key=week_key)
         database.log_event(
             guild.id,
             "manual_restart_pre_voting",
-            {"week_key": week_key, "actor_id": actor_id},
+            {"week_key": week_key, "actor_id": actor_id, "manual": manual},
         )
         await self._announce_mod(
             guild,
-            "Pre-Voting Restarted",
-            f"Stopped any active game state and restarted Pre-Voting for `{week_key}`.",
+            "Pre-Voting Restarted" if not manual else "Pre-Vote Started (Manual)",
+            (
+                f"Pre-vote opened for `{week_key}` from {_format_et(now_utc)}."
+                if manual
+                else f"Stopped any active game state and restarted Pre-Voting for `{week_key}`."
+            ),
             discord.Color.blurple(),
         )
+        return week_key
 
     async def _expire_winners(self, guild: discord.Guild) -> int:
         role = discord.utils.get(guild.roles, name=ROLE_WINNER)
@@ -1519,7 +1562,7 @@ class SchedulerCog(commands.Cog):
             return
         await ctx.send("Running Monday-open flow now…")
         try:
-            updated, counts = await self._monday_open_one_guild(ctx.guild)
+            updated, counts = await self._monday_open_one_guild(ctx.guild, manual=True)
             done = discord.Embed(
                 title="Manual Monday Open — Done",
                 description=(

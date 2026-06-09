@@ -217,7 +217,7 @@ def _pick_results_week_key_for_guild(guild_id: int) -> str | None:
     if database.is_voting_open(guild_id):
         return database.week_key_for()
     if database.is_ticker_selection_open(guild_id):
-        return database.ticker_selection_week_key_for()
+        return database.ticker_selection_week_key_for_guild(guild_id)
     return None
 
 
@@ -341,7 +341,7 @@ async def _try_add_ticker_to_pick_results(
     """
     Returns (ok, reason, category_count). reason ∈ {'not_found', 'duplicate', 'full', 'ok', ...}
     """
-    week_key = database.ticker_selection_week_key_for()
+    week_key = database.ticker_selection_week_key_for_guild(guild.id)
     category_key = _category_key_for_idx(category_idx)
     found = await _ensure_pick_results_message(guild)
     if not found:
@@ -381,7 +381,14 @@ async def _is_channel_closed(ch: discord.TextChannel) -> bool:
     """A channel is closed once its category reaches the weekly ticker limit."""
     try:
         category_key = category_for_channel(ch.name)
-        return database.count_tickers(ch.guild.id, database.ticker_selection_week_key_for(), category_key) >= TICKER_LIMIT_PER_CATEGORY
+        return (
+            database.count_tickers(
+                ch.guild.id,
+                database.ticker_selection_week_key_for_guild(ch.guild.id),
+                category_key,
+            )
+            >= TICKER_LIMIT_PER_CATEGORY
+        )
     except Exception:
         pass
     pr_ch = await _get_pick_results_channel(ch.guild)
@@ -633,7 +640,7 @@ class StockPickerView(discord.ui.View):
         try:
             already_picked = already_picked or database.user_has_ticker_pick(
                 self.channel.guild.id,
-                database.ticker_selection_week_key_for(),
+                database.ticker_selection_week_key_for_guild(self.channel.guild.id),
                 category_for_channel(self.channel.name),
                 interaction.user.id,
             )
@@ -877,7 +884,9 @@ class StockPickerView(discord.ui.View):
                     interaction.guild.id,
                     "ticker_pick",
                     {
-                        "week_key": database.ticker_selection_week_key_for(),
+                        "week_key": database.ticker_selection_week_key_for_guild(
+                            self.channel.guild.id
+                        ),
                         "category": category_for_channel(self.channel.name),
                         "ticker": ticker,
                         "user_id": interaction.user.id,
