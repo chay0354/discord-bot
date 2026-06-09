@@ -43,7 +43,9 @@ from config import (
 # Early-window state + voting UI + leaderboards + helpers
 from cogs.weekly_picks import (
     arm_early_window,
+    clear_vote_runtime_state,
     disarm_early_window,
+    hydrate_vote_state,
     restore_early_window,
     is_early_window_active,
     build_weekly_voting_view,
@@ -528,6 +530,8 @@ class SchedulerCog(commands.Cog):
         except Exception as exc:
             rpt.fail("Voting window opened (24h early window armed)", repr(exc))
 
+        hydrate_vote_state(guild.id, week_key)
+
         # 2) Read ballot from Supabase (promote open pre-vote picks into this voting week).
         stored = database.ballot_tickers_for_voting_week(guild.id, week_key)
         lists: List[List[str]] = [stored["small"], stored["mid"], stored["blue"]]
@@ -813,6 +817,7 @@ class SchedulerCog(commands.Cog):
         database.ensure_cycle(guild.id, week_key)
         database.reset_week_game_data(guild.id, week_key)
         reset_picker_runtime_state()
+        clear_vote_runtime_state()
         disarm_early_window()
         database.set_cycle_phase(
             guild.id,
@@ -1088,6 +1093,8 @@ class SchedulerCog(commands.Cog):
             rpt.ok("WEEKLY PICKS voting closed successfully")
         except Exception as exc:
             rpt.fail("WEEKLY PICKS voting closed successfully", repr(exc))
+
+        clear_vote_runtime_state()
 
         # 2) Purge WEEKLY PICKS channels (removes buttons) + post VOTING CLOSED.
         leaderboard_ch = _find_text_channel(guild, CHANNEL_FINAL_LEADERBOARD)

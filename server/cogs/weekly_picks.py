@@ -123,6 +123,9 @@ _user_votes: Dict[int, Dict[int, Set[str]]] = {0: {}, 1: {}, 2: {}}
 # per-category vote counts: {category_idx: {ticker: count}}
 _vote_counts: Dict[int, Dict[str, int]] = {0: {}, 1: {}, 2: {}}
 
+# week_key backing the in-memory vote caches (cleared when a new game starts)
+_active_vote_week_key: str | None = None
+
 # live leaderboard message ids per category (best-effort, not persisted)
 _live_msg_ids: Dict[int, int] = {}
 _leaderboard_update_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
@@ -341,9 +344,20 @@ def _revert_optimistic_vote(cat: int, user_id: int, ticker: str) -> None:
             counts.pop(sym, None)
 
 
+def clear_vote_runtime_state() -> None:
+    """Drop in-memory vote caches when a week ends or restarts."""
+    global _active_vote_week_key
+    _active_vote_week_key = None
+    for idx in range(3):
+        _vote_counts[idx].clear()
+        _user_votes[idx].clear()
+
+
 def hydrate_vote_state(guild_id: int, week_key: str | None = None) -> None:
     """Load this week's votes into memory so button replies can be instant."""
+    global _active_vote_week_key
     wk = week_key or database.week_key_for()
+    _active_vote_week_key = wk
     rows = database.fetch_week_vote_rows(guild_id, wk)
     cat_keys = ["small", "mid", "blue"]
     for idx in range(3):
@@ -798,6 +812,8 @@ class WeeklyVotingView(discord.ui.View):
         cat = self.category_idx
         category_key = ["small", "mid", "blue"][cat]
         week_key = database.voting_week_key_for_guild(guild.id)
+        if _active_vote_week_key != week_key:
+            await asyncio.to_thread(hydrate_vote_state, guild.id, week_key)
         member: discord.Member = interaction.user
         if not _can_vote(member):
             rules_mention = _channel_mention_or_text(
