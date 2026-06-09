@@ -215,7 +215,7 @@ def _pick_results_embed_from_tickers(
 def _pick_results_week_key_for_guild(guild_id: int) -> str | None:
     """Week key whose ticker_picks should appear on #pick-results."""
     if database.is_voting_open(guild_id):
-        return database.week_key_for()
+        return database.voting_week_key_for_guild(guild_id)
     if database.is_ticker_selection_open(guild_id):
         return database.ticker_selection_week_key_for_guild(guild_id)
     return None

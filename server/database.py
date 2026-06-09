@@ -274,6 +274,25 @@ def open_ticker_selection_week_key(guild_id: int) -> str | None:
     return None
 
 
+def open_voting_week_key(guild_id: int) -> str | None:
+    """Week key for the guild's currently open voting cycle, if any."""
+    row = _single(
+        "game_cycles",
+        f"?select=week_key&guild_id=eq.{guild_id}&voting_open=eq.true&limit=1",
+    )
+    if row and row.get("week_key"):
+        return str(row["week_key"])
+    return None
+
+
+def voting_week_key_for_guild(guild_id: int) -> str:
+    """Resolve the active voting week (DB cycle first, then calendar heuristic)."""
+    open_key = open_voting_week_key(guild_id)
+    if open_key:
+        return open_key
+    return week_key_for()
+
+
 def ticker_selection_week_key_for_guild(guild_id: int) -> str:
     """Resolve the active pre-vote week (DB cycle first, then calendar heuristic)."""
     open_key = open_ticker_selection_week_key(guild_id)
@@ -289,7 +308,9 @@ def is_ticker_selection_open(guild_id: int, week_key: str | None = None) -> bool
 
 
 def is_voting_open(guild_id: int, week_key: str | None = None) -> bool:
-    return bool(ensure_cycle(guild_id, week_key)["voting_open"])
+    if week_key is not None:
+        return bool(ensure_cycle(guild_id, week_key)["voting_open"])
+    return open_voting_week_key(guild_id) is not None
 
 
 def upsert_user(discord_id: int, username: str | None = None, **fields: Any) -> None:
@@ -455,6 +476,102 @@ def user_has_ticker_pick(guild_id: int, week_key: str, category: str, user_id: i
         ),
     )
     return bool(rows)
+
+
+def copy_ticker_picks(guild_id: int, from_week: str, to_week: str) -> int:
+    """Copy ballot tickers from one week_key to another. Returns rows copied."""
+    if from_week == to_week:
+        return 0
+    ensure_cycle(guild_id, to_week)
+    rows = list_ticker_pick_rows(guild_id, from_week)
+    copied = 0
+    for row in rows:
+        payload = {
+            "guild_id": guild_id,
+            "week_key": to_week,
+            "category": row["category"],
+            "ticker": row["ticker"],
+            "market_cap": row.get("market_cap"),
+            "submitted_by": row.get("submitted_by"),
+            "submitted_at": utc_now_iso(),
+        }
+        try:
+            _request("POST", "ticker_picks", json_body=payload)
+            copied += 1
+        except SupabaseError:
+            pass
+    return copied
+
+
+def seed_ticker_picks_from_lists(
+    guild_id: int,
+    week_key: str,
+    lists: dict[str, list[str]],
+) -> int:
+    """Persist ballot symbols under week_key (used when promoting an embed fallback)."""
+    ensure_cycle(guild_id, week_key)
+    seeded = 0
+    for category in CATEGORIES:
+        for sym in lists.get(category, []):
+            ticker = str(sym).strip().lstrip("$").upper()
+            if not ticker:
+                continue
+            payload = {
+                "guild_id": guild_id,
+                "week_key": week_key,
+                "category": category,
+                "ticker": ticker,
+                "submitted_by": 0,
+                "submitted_at": utc_now_iso(),
+            }
+            try:
+                _request("POST", "ticker_picks", json_body=payload)
+                seeded += 1
+            except SupabaseError:
+                pass
+    return seeded
+
+
+def ballot_tickers_for_voting_week(guild_id: int, voting_week_key: str) -> dict[str, list[str]]:
+    """Return the ballot for a voting week, promoting pre-vote picks into the DB when needed."""
+    stored = list_tickers(guild_id, voting_week_key)
+    if any(stored.values()):
+        return stored
+    selection_key = open_ticker_selection_week_key(guild_id)
+    if selection_key and selection_key != voting_week_key:
+        source = list_tickers(guild_id, selection_key)
+        if any(source.values()):
+            copy_ticker_picks(guild_id, selection_key, voting_week_key)
+            return list_tickers(guild_id, voting_week_key)
+    return stored
+
+
+def close_open_ticker_selection_cycles(
+    guild_id: int,
+    *,
+    except_week_key: str | None = None,
+) -> list[str]:
+    """Close any open pre-vote cycles. Returns the week keys that were closed."""
+    rows = _select(
+        "game_cycles",
+        f"?select=week_key&guild_id=eq.{guild_id}&ticker_selection_open=eq.true",
+    )
+    closed: list[str] = []
+    for row in rows:
+        wk = str(row["week_key"])
+        if except_week_key and wk == except_week_key:
+            continue
+        cycle = ensure_cycle(guild_id, wk)
+        set_cycle_phase(
+            guild_id,
+            wk,
+            status=str(cycle.get("status") or "closed"),
+            ticker_selection_open=False,
+            voting_open=bool(cycle.get("voting_open")),
+            early_window_open=bool(cycle.get("early_window_open")),
+        )
+        closed.append(wk)
+    return closed
 
 
 def list_tickers(guild_id: int, week_key: str, category: str | None = None) -> dict[str, list[str]]:

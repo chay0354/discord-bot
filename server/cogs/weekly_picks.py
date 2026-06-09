@@ -519,7 +519,7 @@ async def _post_or_update_leaderboard(guild: discord.Guild, cat: int) -> None:
     ch = _find_text_channel(guild, ch_name)
     if not ch:
         return
-    week_key = database.week_key_for()
+    week_key = database.voting_week_key_for_guild(guild.id)
     pairs = database.vote_counts(guild.id, week_key, ["small", "mid", "blue"][cat])
     tickers = [ticker for ticker, _ in pairs]
     quotes, names = await asyncio.to_thread(quote_and_names_for_symbols, tickers)
@@ -668,9 +668,8 @@ class WeeklyVotingView(discord.ui.View):
             btn.callback = _cb  # type: ignore
             self.add_item(btn)
 
-    async def _finalize_vote_background(
+    async def _persist_vote(
         self,
-        interaction: discord.Interaction,
         *,
         guild: discord.Guild,
         cat: int,
@@ -680,7 +679,8 @@ class WeeklyVotingView(discord.ui.View):
         member: discord.Member,
         limit: int,
         role_at_vote: str,
-    ) -> None:
+    ) -> tuple[bool, str, int, str]:
+        """Validate and save a vote. Returns (ok, user_message, save_cat_idx, save_category_key)."""
         def _log_vote(event: str, **extra: object) -> None:
             payload = {
                 "user_id": member.id,
@@ -704,23 +704,23 @@ class WeeklyVotingView(discord.ui.View):
                 ticker,
             )
             if not ctx["voting_open"]:
-                _revert_optimistic_vote(cat, member.id, ticker)
                 _log_vote("vote_rejected", reason="voting_closed")
-                await interaction.followup.send(
+                return (
+                    False,
                     "Voting is closed. Next voting opens Monday at 9:00 AM ET.",
-                    ephemeral=True,
+                    cat,
+                    category_key,
                 )
-                return
 
             actual_cat = ctx["actual_category"]
             if not actual_cat:
-                _revert_optimistic_vote(cat, member.id, ticker)
                 _log_vote("vote_rejected", reason="not_on_ballot")
-                await interaction.followup.send(
+                return (
+                    False,
                     f"${ticker} is not in this week's game lists.",
-                    ephemeral=True,
+                    cat,
+                    category_key,
                 )
-                return
 
             save_cat = cat
             save_key = category_key
@@ -729,23 +729,23 @@ class WeeklyVotingView(discord.ui.View):
                 save_cat = CATEGORIES.index(actual_cat)
 
             if ctx["prior_vote_category"]:
-                _revert_optimistic_vote(cat, member.id, ticker)
                 _log_vote("vote_rejected", reason="duplicate_prior")
-                await interaction.followup.send(
+                return (
+                    False,
                     f"You already voted for ${ticker} this week.",
-                    ephemeral=True,
+                    save_cat,
+                    save_key,
                 )
-                return
 
             db_count = int(ctx["vote_count"])
             if db_count >= limit:
-                _revert_optimistic_vote(cat, member.id, ticker)
                 _log_vote("vote_rejected", reason="limit_reached", db_count=db_count, limit=limit)
-                await interaction.followup.send(
+                return (
+                    False,
                     "YOU HAVE REACHED THE LIMIT OF YOUR VOTES. NEXT VOTING OPENS MONDAY 9AM.",
-                    ephemeral=True,
+                    save_cat,
+                    save_key,
                 )
-                return
 
             is_early = is_early_window_active() and role_at_vote == "NPC"
             ok, reason = await asyncio.to_thread(
@@ -759,38 +759,23 @@ class WeeklyVotingView(discord.ui.View):
                 is_early,
             )
             if not ok:
-                _revert_optimistic_vote(cat, member.id, ticker)
                 _log_vote("vote_rejected", reason=reason or "save_failed")
                 if reason == "duplicate":
-                    await interaction.followup.send(
-                        f"You already voted for ${ticker}.",
-                        ephemeral=True,
-                    )
-                else:
-                    await interaction.followup.send(
-                        "Your vote could not be saved. Please try again.",
-                        ephemeral=True,
-                    )
-                return
-
-            if save_cat != cat:
-                _revert_optimistic_vote(cat, member.id, ticker)
-                _user_votes[save_cat].setdefault(member.id, set()).add(ticker)
-                _inc_count(save_cat, ticker, +1)
+                    return False, f"You already voted for ${ticker}.", save_cat, save_key
+                return (
+                    False,
+                    "Your vote could not be saved. Please try again.",
+                    save_cat,
+                    save_key,
+                )
 
             _record_early_vote_if_applicable(save_cat, member, ticker)
             _schedule_leaderboard_update(guild, save_cat)
             _log_vote("vote_recorded", category=save_key, is_early=is_early)
+            return True, "", save_cat, save_key
         except Exception as exc:
-            _revert_optimistic_vote(cat, member.id, ticker)
             _log_vote("vote_rejected", reason=f"exception:{exc!r}"[:200])
-            try:
-                await interaction.followup.send(
-                    "Your vote could not be saved. Please try again.",
-                    ephemeral=True,
-                )
-            except Exception:
-                pass
+            return False, "Your vote could not be saved. Please try again.", cat, category_key
 
     async def _handle_vote(
         self,
@@ -812,7 +797,7 @@ class WeeklyVotingView(discord.ui.View):
         guild = interaction.guild
         cat = self.category_idx
         category_key = ["small", "mid", "blue"][cat]
-        week_key = database.week_key_for()
+        week_key = database.voting_week_key_for_guild(guild.id)
         member: discord.Member = interaction.user
         if not _can_vote(member):
             rules_mention = _channel_mention_or_text(
@@ -847,50 +832,20 @@ class WeeklyVotingView(discord.ui.View):
             )
             return
 
-        # ---- NPC-special UX: limit==1 ----
-        if limit == 1:
-            if mem_count >= 1:
-                reg_mention = _channel_mention_or_text(
-                    guild,
-                    list(SUBSCRIBE_CHANNEL_CANDIDATES),
-                    "#subscribe",
-                )
-                await interaction.followup.send(
-                    "YOU HAVE REACHED THE LIMIT OF YOUR VOTES. "
-                    "NEXT VOTING OPENS MONDAY 9AM. "
-                    f"IF YOU WANT TO GET MORE VOTES AND EXTRA PRESS HERE TO SUBSCRIBE: {reg_mention}",
-                    ephemeral=True
-                )
-                return
-
+        if limit == 1 and mem_count >= 1:
             reg_mention = _channel_mention_or_text(
                 guild,
                 list(SUBSCRIBE_CHANNEL_CANDIDATES),
                 "#subscribe",
             )
             await interaction.followup.send(
-                f"{_vote_confirmation_message(ticker, cat, 1, limit)}\n"
-                f"Join {reg_mention} to get 5 weekly votes and see live results in real time.",
-                ephemeral=True,
-            )
-            user_set.add(ticker)
-            _inc_count(cat, ticker, +1)
-            asyncio.create_task(
-                self._finalize_vote_background(
-                    interaction,
-                    guild=guild,
-                    cat=cat,
-                    category_key=category_key,
-                    week_key=week_key,
-                    ticker=ticker,
-                    member=member,
-                    limit=limit,
-                    role_at_vote=role_at_vote,
-                )
+                "YOU HAVE REACHED THE LIMIT OF YOUR VOTES. "
+                "NEXT VOTING OPENS MONDAY 9AM. "
+                f"IF YOU WANT TO GET MORE VOTES AND EXTRA PRESS HERE TO SUBSCRIBE: {reg_mention}",
+                ephemeral=True
             )
             return
 
-        # ---- Default (PLAYER/ADMIN) behavior ----
         if mem_count >= limit:
             await interaction.followup.send(
                 "YOU HAVE REACHED THE LIMIT OF YOUR VOTES. NEXT VOTING OPENS MONDAY 9AM.",
@@ -898,25 +853,40 @@ class WeeklyVotingView(discord.ui.View):
             )
             return
 
-        new_count = mem_count + 1
-        await interaction.followup.send(
-            _vote_confirmation_message(ticker, cat, new_count, limit),
-            ephemeral=True,
+        ok, err_msg, save_cat, _save_key = await self._persist_vote(
+            guild=guild,
+            cat=cat,
+            category_key=category_key,
+            week_key=week_key,
+            ticker=ticker,
+            member=member,
+            limit=limit,
+            role_at_vote=role_at_vote,
         )
+        if not ok:
+            await interaction.followup.send(err_msg, ephemeral=True)
+            return
+
         user_set.add(ticker)
-        _inc_count(cat, ticker, +1)
-        asyncio.create_task(
-            self._finalize_vote_background(
-                interaction,
-                guild=guild,
-                cat=cat,
-                category_key=category_key,
-                week_key=week_key,
-                ticker=ticker,
-                member=member,
-                limit=limit,
-                role_at_vote=role_at_vote,
+        _inc_count(save_cat, ticker, +1)
+        new_count = len(_ensure_user_slot(save_cat, member.id))
+
+        if limit == 1:
+            reg_mention = _channel_mention_or_text(
+                guild,
+                list(SUBSCRIBE_CHANNEL_CANDIDATES),
+                "#subscribe",
             )
+            await interaction.followup.send(
+                f"{_vote_confirmation_message(ticker, save_cat, new_count, limit)}\n"
+                f"Join {reg_mention} to get 5 weekly votes and see live results in real time.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            _vote_confirmation_message(ticker, save_cat, new_count, limit),
+            ephemeral=True,
         )
 
 
@@ -1180,9 +1150,9 @@ class WeeklyPicksCog(commands.Cog):
         if getattr(self, "_recovered", False):
             return
         self._recovered = True
-        week_key = database.week_key_for()
         for guild in self.bot.guilds:
             await asyncio.to_thread(_restore_message_ids_from_db, guild.id)
+            week_key = database.voting_week_key_for_guild(guild.id)
             try:
                 cycle = await asyncio.to_thread(database.ensure_cycle, guild.id, week_key)
             except Exception as exc:
@@ -1203,7 +1173,11 @@ class WeeklyPicksCog(commands.Cog):
 
             # 3) Re-register voting buttons so clicks keep working after restart.
             try:
-                stored = await asyncio.to_thread(database.list_tickers, guild.id, week_key)
+                stored = await asyncio.to_thread(
+                    database.ballot_tickers_for_voting_week,
+                    guild.id,
+                    week_key,
+                )
                 lists = [stored.get("small", []), stored.get("mid", []), stored.get("blue", [])]
                 registered = 0
                 for cat in range(3):

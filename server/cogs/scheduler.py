@@ -34,6 +34,7 @@ from config import (
     CHANNEL_WINNERS,
     PLAYER_CHANNEL_CANDIDATES,
     ROLE_ADMIN,
+    ROLE_NPC,
     ROLE_PLAYER,
     ROLE_WINNER,
     TICKER_LIMIT_PER_CATEGORY,
@@ -527,21 +528,42 @@ class SchedulerCog(commands.Cog):
         except Exception as exc:
             rpt.fail("Voting window opened (24h early window armed)", repr(exc))
 
-        # 2) Read ballot from Supabase (tickers chosen during weekend selection).
-        stored = database.list_tickers(guild.id, week_key)
+        # 2) Read ballot from Supabase (promote open pre-vote picks into this voting week).
+        stored = database.ballot_tickers_for_voting_week(guild.id, week_key)
         lists: List[List[str]] = [stored["small"], stored["mid"], stored["blue"]]
         pr_msg = None
         pr_emb = None
-        try:
-            pr_ch = await _get_pick_results_channel(guild)
-            if pr_ch:
-                found = await _find_pick_results_message(pr_ch)
-                if found:
-                    pr_msg, pr_emb = found
-                    if not any(lists):
+        if not any(lists):
+            try:
+                pr_ch = await _get_pick_results_channel(guild)
+                if pr_ch:
+                    found = await _find_pick_results_message(pr_ch)
+                    if found:
+                        pr_msg, pr_emb = found
                         lists = _extract_lists_from_pick_results(pr_emb)
-        except Exception:
-            pass
+                        if any(lists):
+                            database.seed_ticker_picks_from_lists(
+                                guild.id,
+                                week_key,
+                                {
+                                    "small": lists[0],
+                                    "mid": lists[1],
+                                    "blue": lists[2],
+                                },
+                            )
+                            stored = database.list_tickers(guild.id, week_key)
+                            lists = [stored["small"], stored["mid"], stored["blue"]]
+            except Exception:
+                pass
+        try:
+            closed_pre_vote = database.close_open_ticker_selection_cycles(guild.id)
+            if closed_pre_vote:
+                rpt.info(
+                    "Parallel pre-vote cycles closed",
+                    ", ".join(f"`{wk}`" for wk in closed_pre_vote),
+                )
+        except Exception as exc:
+            rpt.fail("Parallel pre-vote cycles closed", repr(exc))
         total_moved = sum(len(lists[i]) for i in range(3))
 
         def _fmt_tickers(symbols: List[str]) -> str:
@@ -886,6 +908,17 @@ class SchedulerCog(commands.Cog):
                             "expires_at": row.get("expires_at"),
                         },
                     )
+                    npc_role = discord.utils.get(guild.roles, name=ROLE_NPC)
+                    player_role = discord.utils.get(guild.roles, name=ROLE_PLAYER)
+                    if (
+                        npc_role
+                        and npc_role not in member.roles
+                        and (not player_role or player_role not in member.roles)
+                    ):
+                        try:
+                            await member.add_roles(npc_role, reason="WINNER expired — restored NPC")
+                        except Exception:
+                            pass
                     try:
                         await member.send(_winner_role_removed_dm(player_mention))
                     except Exception:
@@ -1236,6 +1269,20 @@ class SchedulerCog(commands.Cog):
                             "expires_at": expires_at,
                         },
                     )
+                    # Move the winner into WINNER for the week: drop NPC so they hold
+                    # only the upgraded role. NPC is restored automatically when the
+                    # WINNER grant expires (see _expire_winners).
+                    npc_role = discord.utils.get(member.roles, name=ROLE_NPC)
+                    if npc_role:
+                        try:
+                            await member.remove_roles(
+                                npc_role, reason="Promoted to WINNER for the week"
+                            )
+                        except Exception as npc_exc:
+                            print(
+                                f"[scheduler] could not remove NPC from winner {user_id}: {npc_exc!r}",
+                                flush=True,
+                            )
                 except Exception as role_exc:
                     print(f"[scheduler] WINNER role grant to {user_id} failed: {role_exc!r}", flush=True)
                     grant_errors += 1
