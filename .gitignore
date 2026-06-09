@@ -29,3 +29,5 @@ crm/node_modules/
 crm/dist/
 crm/.env.local
 server/.env
+
+server/docs/Untitled spreadsheet.xlsx
