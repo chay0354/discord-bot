@@ -1,9 +1,8 @@
-"""Reaction-role onboarding gate: press the emoji in the welcome channel -> NPC role.
+"""Reaction-role onboarding gate: press emoji in the RULES channel -> NPC role.
 
-Posts (or reuses) a single gate message in the welcome channel with a reaction.
-When a member reacts with the configured emoji, they are granted the NPC role.
-The gate message is identified by a hidden marker in its embed footer, so it
-survives restarts without needing a settings table.
+Posts (or reuses) a gate message in #RULES with reaction emojis (default 🔥 🚀).
+When a member reacts, they receive the NPC role. Matches the original Carl-bot
+flow in the RULES channel.
 """
 from __future__ import annotations
 
@@ -12,20 +11,19 @@ from discord.ext import commands
 
 from config import (
     CHANNEL_MOD,
-    CHANNEL_WELCOME,
-    NPC_GATE_EMOJI,
+    CHANNEL_RULES,
+    NPC_GATE_EMOJIS,
     ROLE_NPC,
     ROLE_PLAYER,
     ROLE_WINNER,
-    WELCOME_CHANNEL_CANDIDATES,
+    RULES_CHANNEL_CANDIDATES,
 )
 
 GATE_MARKER = "npc-gate-v1"
-GATE_TITLE = "🎮 Get Access"
+GATE_TITLE = "Get Access"
 GATE_BODY = (
-    "Press the **{emoji}** reaction below to join the game.\n\n"
-    "You'll receive the **NPC** role, which unlocks the rules and the weekly "
-    "voting channels. Free members get **1 vote** per category."
+    "React with **{emojis}** below to join the game as a free member (**NPC**).\n\n"
+    "NPC members get **1 vote** per category during the weekly stock game."
 )
 
 
@@ -41,17 +39,18 @@ class OnboardingCog(commands.Cog):
                 return channel
         return None
 
-    def _welcome_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
-        for name in (CHANNEL_WELCOME, *WELCOME_CHANNEL_CANDIDATES):
+    def _rules_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
+        for name in (CHANNEL_RULES, *RULES_CHANNEL_CANDIDATES):
             ch = self._find_channel(guild, name)
             if ch:
                 return ch
         return None
 
     def _gate_embed(self) -> discord.Embed:
+        emoji_list = " / ".join(NPC_GATE_EMOJIS)
         embed = discord.Embed(
             title=GATE_TITLE,
-            description=GATE_BODY.format(emoji=NPC_GATE_EMOJI),
+            description=GATE_BODY.format(emojis=emoji_list),
             color=discord.Color.green(),
         )
         embed.set_footer(text=GATE_MARKER)
@@ -69,12 +68,11 @@ class OnboardingCog(commands.Cog):
                 print(f"[onboarding] gate setup failed for {guild.id}: {exc!r}", flush=True)
 
     async def _ensure_gate_message(self, guild: discord.Guild) -> None:
-        channel = self._welcome_channel(guild)
+        channel = self._rules_channel(guild)
         if not channel:
-            print(f"[onboarding] no welcome channel in guild {guild.id}", flush=True)
+            print(f"[onboarding] no rules channel in guild {guild.id}", flush=True)
             return
 
-        # Look for an existing gate message authored by the bot (marker in footer).
         existing: discord.Message | None = None
         try:
             async for msg in channel.history(limit=50):
@@ -84,7 +82,7 @@ class OnboardingCog(commands.Cog):
                     existing = msg
                     break
         except (discord.Forbidden, discord.HTTPException) as exc:
-            print(f"[onboarding] cannot read welcome history in {guild.id}: {exc!r}", flush=True)
+            print(f"[onboarding] cannot read rules history in {guild.id}: {exc!r}", flush=True)
 
         if existing is None:
             try:
@@ -95,15 +93,13 @@ class OnboardingCog(commands.Cog):
 
         self._gate_message_ids[guild.id] = existing.id
 
-        # Make sure the bot's own reaction is present so members can just click it.
-        already = any(
-            str(r.emoji) == NPC_GATE_EMOJI and r.me for r in existing.reactions
-        )
-        if not already:
-            try:
-                await existing.add_reaction(NPC_GATE_EMOJI)
-            except (discord.Forbidden, discord.HTTPException) as exc:
-                print(f"[onboarding] cannot add gate reaction in {guild.id}: {exc!r}", flush=True)
+        present = {str(r.emoji) for r in existing.reactions if r.me}
+        for emoji in NPC_GATE_EMOJIS:
+            if emoji not in present:
+                try:
+                    await existing.add_reaction(emoji)
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    print(f"[onboarding] cannot add {emoji} reaction in {guild.id}: {exc!r}", flush=True)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
@@ -111,7 +107,7 @@ class OnboardingCog(commands.Cog):
             return
         if payload.member.bot:
             return
-        if str(payload.emoji) != NPC_GATE_EMOJI:
+        if str(payload.emoji) not in NPC_GATE_EMOJIS:
             return
         gate_id = self._gate_message_ids.get(payload.guild_id)
         if gate_id is None or payload.message_id != gate_id:
@@ -122,12 +118,12 @@ class OnboardingCog(commands.Cog):
         guild = member.guild
         existing = {r.name.upper() for r in member.roles}
         if {ROLE_PLAYER.upper(), ROLE_WINNER.upper(), ROLE_NPC.upper()} & existing:
-            return  # already has a game role
+            return
         role = discord.utils.get(guild.roles, name=ROLE_NPC)
         if not role:
             await self._mod_log(
                 guild, "NPC role missing",
-                f"Role `{ROLE_NPC}` not found — cannot grant it to <@{member.id}> from the welcome gate.",
+                f"Role `{ROLE_NPC}` not found — cannot grant it to <@{member.id}> from the rules gate.",
                 discord.Color.orange(),
             )
             return
@@ -141,7 +137,7 @@ class OnboardingCog(commands.Cog):
             )
             return
         try:
-            await member.add_roles(role, reason="Welcome gate reaction")
+            await member.add_roles(role, reason="Rules channel gate reaction")
             print(f"[onboarding] granted NPC to {member.id} in {guild.id}", flush=True)
         except (discord.Forbidden, discord.HTTPException) as exc:
             print(f"[onboarding] could not grant NPC to {member.id}: {exc!r}", flush=True)
@@ -159,13 +155,14 @@ class OnboardingCog(commands.Cog):
     @commands.has_role("ADMIN")
     @commands.guild_only()
     async def post_npc_gate(self, ctx: commands.Context) -> None:
-        """ADMIN: (re)post the 'react to get NPC' gate in the welcome channel."""
+        """ADMIN: (re)post the 'react to get NPC' gate in the rules channel."""
         await self._ensure_gate_message(ctx.guild)
-        ch = self._welcome_channel(ctx.guild)
+        ch = self._rules_channel(ctx.guild)
         if ch:
-            await ctx.send(f"NPC gate is set in {ch.mention}.")
+            emojis = " ".join(NPC_GATE_EMOJIS)
+            await ctx.send(f"NPC gate is set in {ch.mention} with reactions {emojis}.")
         else:
-            await ctx.send("No welcome channel found. Set WELCOME_CHANNEL env or create one.")
+            await ctx.send("No rules channel found. Set RULES_CHANNEL env or create one.")
 
 
 async def setup(bot: commands.Bot):
