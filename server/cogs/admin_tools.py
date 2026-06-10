@@ -147,6 +147,17 @@ class AdminToolsCog(commands.Cog):
                 bot_member: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, read_message_history=True),
             }
 
+        def subscribe_funnel_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
+            """Subscribe / become-PLAYER channel: NPCs only (hide from PLAYER and ADMIN)."""
+            return {
+                everyone: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                npc_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                player_role: discord.PermissionOverwrite(view_channel=False),
+                winner_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                admin_role: discord.PermissionOverwrite(view_channel=False),
+                bot_member: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, read_message_history=True),
+            }
+
         def subscriber_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
             return {
                 everyone: discord.PermissionOverwrite(view_channel=False),
@@ -182,7 +193,7 @@ class AdminToolsCog(commands.Cog):
             CHANNEL_BLUE_LIVE: subscriber_overwrites(),
             CHANNEL_MOD: mod_overwrites(),
             CHANNEL_ADMIN_ACTIONS: mod_overwrites(),
-            CHANNEL_SUBSCRIBE: public_overwrites(),
+            CHANNEL_SUBSCRIBE: subscribe_funnel_overwrites(),
             CHANNEL_MANAGE_SUBSCRIPTION: public_overwrites(),
             CHANNEL_FINAL_LEADERBOARD: public_overwrites(),
             CHANNEL_WINNERS: public_overwrites(),

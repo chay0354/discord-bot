@@ -159,6 +159,29 @@ def public_view_overwrites(roles: list[dict], guild_id: str) -> list[dict]:
     return out
 
 
+def subscribe_funnel_overwrites(roles: list[dict], guild_id: str) -> list[dict]:
+    """Subscribe / become-PLAYER: @everyone+NPC+WINNER view; PLAYER+ADMIN hidden."""
+    everyone_id = guild_id
+    npc = role_id(roles, ROLE_NPC)
+    player = role_id(roles, ROLE_PLAYER)
+    winner = role_id(roles, ROLE_WINNER)
+    admin = role_id(roles, ROLE_ADMIN)
+
+    view_only = P_VIEW_CHANNEL | P_READ_MESSAGE_HISTORY
+    out = [
+        {"id": everyone_id, "type": 0, "allow": str(view_only), "deny": str(P_SEND_MESSAGES)},
+    ]
+    if npc:
+        out.append({"id": npc, "type": 0, "allow": str(view_only), "deny": str(P_SEND_MESSAGES)})
+    if winner:
+        out.append({"id": winner, "type": 0, "allow": str(view_only), "deny": str(P_SEND_MESSAGES)})
+    if player:
+        out.append({"id": player, "type": 0, "allow": "0", "deny": str(P_VIEW_CHANNEL)})
+    if admin:
+        out.append({"id": admin, "type": 0, "allow": "0", "deny": str(P_VIEW_CHANNEL)})
+    return out
+
+
 def subscriber_overwrites(roles: list[dict], guild_id: str) -> list[dict]:
     """@everyone hidden; PLAYER/WINNER view; ADMIN view+send."""
     everyone_id = guild_id
@@ -253,12 +276,12 @@ def main() -> int:
             print(f"  would create #{CHANNEL_SUBSCRIBE} only if no similar channel exists")
     else:
         print(f"Channel: #{found_subscribe['name']} (id={found_subscribe['id']})")
-        new_ow = public_view_overwrites(roles, GUILD_ID)
+        new_ow = subscribe_funnel_overwrites(roles, GUILD_ID)
         if APPLY:
             patch_channel(found_subscribe["id"], {"permission_overwrites": new_ow})
-            print("  -> updated overwrites: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
+            print("  -> updated overwrites: @everyone/NPC/WINNER view; PLAYER+ADMIN hidden")
         else:
-            print("  would update overwrites to: @everyone view, NPC/PLAYER/WINNER view, ADMIN view+send")
+            print("  would update overwrites to: @everyone/NPC/WINNER view; PLAYER+ADMIN hidden")
 
     subscribe_category_id: str | None = None
     if found_subscribe and found_subscribe.get("parent_id"):

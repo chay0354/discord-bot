@@ -139,6 +139,17 @@ class PermissionEnsurer(discord.Client):
                     me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, read_message_history=True, embed_links=True),
                 }
 
+            def subscribe_funnel_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
+                """Subscribe / become-PLAYER channel: NPCs only (hide from PLAYER and ADMIN)."""
+                return {
+                    everyone: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                    npc_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                    player_role: discord.PermissionOverwrite(view_channel=False),
+                    winner_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+                    admin_role: discord.PermissionOverwrite(view_channel=False),
+                    me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, read_message_history=True, embed_links=True),
+                }
+
             def subscriber_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
                 return {
                     everyone: discord.PermissionOverwrite(view_channel=False),
@@ -185,10 +196,10 @@ class PermissionEnsurer(discord.Client):
                 if subscribe_ch:
                     break
             if subscribe_ch:
-                await subscribe_ch.edit(overwrites=public_overwrites(), reason="Stock bot permission verification")
-                print(f"[UPDATE] #{subscribe_ch.name} (subscribe)", flush=True)
+                await subscribe_ch.edit(overwrites=subscribe_funnel_overwrites(), reason="Stock bot permission verification")
+                print(f"[UPDATE] #{subscribe_ch.name} (subscribe — NPC/WINNER only)", flush=True)
             else:
-                await _ensure_channel(guild, CHANNEL_SUBSCRIBE, public_overwrites())
+                await _ensure_channel(guild, CHANNEL_SUBSCRIBE, subscribe_funnel_overwrites())
         await self.close()
 
 
