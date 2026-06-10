@@ -100,8 +100,9 @@ class AdminToolsCog(commands.Cog):
             await ctx.send("This command must be used inside a server.")
             return
 
+        # No manage_channels on human ADMIN — Discord bypasses channel view denies for that
+        # permission, so #PLAYER would stay visible in the sidebar. The bot edits channels itself.
         admin_perms = discord.Permissions(
-            manage_channels=True,
             manage_roles=True,
             manage_messages=True,
             view_channel=True,

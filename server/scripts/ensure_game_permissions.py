@@ -103,7 +103,6 @@ class PermissionEnsurer(discord.Client):
             print(f"Ensuring permissions in {guild.name}", flush=True)
 
             admin_perms = discord.Permissions(
-                manage_channels=True,
                 manage_roles=True,
                 manage_messages=True,
                 view_channel=True,
