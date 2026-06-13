@@ -700,6 +700,12 @@ def vote_button_context(
             "actual_category": fut_cat.result(),
             "vote_count": fut_count.result(),
             "prior_vote_category": fut_prior.result(),
+            # Early-window timing comes from the cycle so ``is_early`` survives a
+            # bot restart or a separate manual-start process (in-memory window may
+            # be unset there). Authoritative source for the 24h winner window.
+            "early_window_open": bool(cycle.get("early_window_open")),
+            "early_window_start_at": cycle.get("monday_open_at"),
+            "early_window_end_at": cycle.get("early_window_end_at"),
         }
 
 
@@ -1144,6 +1150,37 @@ def save_message_state(
             "updated_at": utc_now_iso(),
         },
         headers={"Prefer": "resolution=merge-duplicates"},
+    )
+
+
+_AUTO_MODE_KEY = "settings:auto_mode"
+
+
+def get_auto_mode(guild_id: int) -> bool:
+    """Whether scheduled time-based automation runs for this guild.
+
+    Defaults to True (automatic) so existing guilds keep the Monday/Tuesday/Friday
+    schedule until an admin explicitly switches to manual (button-driven) mode.
+    """
+    try:
+        row = get_message_state(guild_id, _AUTO_MODE_KEY)
+    except Exception:
+        return True
+    if not row:
+        return True
+    payload = row.get("payload") or {}
+    if isinstance(payload, dict) and "enabled" in payload:
+        return bool(payload["enabled"])
+    return True
+
+
+def set_auto_mode(guild_id: int, enabled: bool) -> None:
+    save_message_state(
+        guild_id,
+        _AUTO_MODE_KEY,
+        channel_id=None,
+        message_id=None,
+        payload={"enabled": bool(enabled)},
     )
 
 

@@ -34,6 +34,7 @@ export type GameStatus = {
   category_titles: Record<string, string>;
   latest_winners: { week_key: string; winner_ids: number[] } | null;
   bot_connected: boolean;
+  auto_mode: boolean;
 };
 
 export type WinningStock = { ticker: string; votes: number; tied: boolean };

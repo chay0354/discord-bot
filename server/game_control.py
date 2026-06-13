@@ -166,6 +166,34 @@ async def run_action(
             ),
         }
 
+    if action in ("toggle_auto_mode", "set_auto_mode", "auto_mode"):
+        current = database.get_auto_mode(target.id)
+        new_state = not current
+        database.set_auto_mode(target.id, new_state)
+        database.log_event(
+            target.id,
+            "auto_mode_changed",
+            {"actor_id": actor_id, "auto_mode": new_state},
+        )
+        if new_state:
+            return {
+                "ok": True,
+                "auto_mode": True,
+                "message": (
+                    "Switched to AUTO mode. The game now runs on the schedule: "
+                    "Monday 9 AM ET open, Tuesday 9 AM ET early-window close, Friday 4 PM ET close."
+                ),
+            }
+        return {
+            "ok": True,
+            "auto_mode": False,
+            "message": (
+                "Switched to MANUAL mode. Scheduled automation is paused — use the "
+                "buttons. Start pre-vote / Start vote anchor the 24h window to the "
+                "moment you press them."
+            ),
+        }
+
     raise ValueError(f"Unknown action: {action}")
 
 
@@ -189,6 +217,7 @@ def get_game_status() -> dict[str, Any]:
         "category_titles": CATEGORY_TITLES,
         "latest_winners": winners,
         "bot_connected": app_state.bot_ready,
+        "auto_mode": database.get_auto_mode(gid),
     }
 
 

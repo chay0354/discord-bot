@@ -5,6 +5,7 @@ import asyncio
 import discord
 from discord.ext import commands
 
+import database
 from config import CHANNEL_ADMIN_ACTIONS, ROLE_ADMIN
 from game_control import run_action
 
@@ -25,6 +26,11 @@ GAME_ACTIONS: tuple[dict[str, str], ...] = (
         "label": "Reset WINNER grants",
         "hint": "Clears every Discord WINNER role and any active DB grants. Normal duration is one week (not 24h).",
     },
+    {
+        "id": "toggle_auto_mode",
+        "label": "Toggle Auto/Manual",
+        "hint": "AUTO runs the weekly schedule by time. MANUAL pauses it and anchors the 24h window to the Start buttons.",
+    },
 )
 
 
@@ -39,11 +45,20 @@ def _find_admin_actions_channel(guild: discord.Guild) -> discord.TextChannel | N
     return None
 
 
-def admin_actions_embed() -> discord.Embed:
+def admin_actions_embed(guild: discord.Guild | None = None) -> discord.Embed:
+    mode_line = ""
+    if guild is not None:
+        try:
+            auto = database.get_auto_mode(guild.id)
+            mode_line = f"**Current mode:** {'AUTO (runs on schedule)' if auto else 'MANUAL (button-driven)'}"
+        except Exception:
+            mode_line = ""
     lines = [
         "Use the buttons below (same as the CRM **Game controls** panel).",
-        "",
     ]
+    if mode_line:
+        lines.append(mode_line)
+    lines.append("")
     for action in GAME_ACTIONS:
         lines.append(f"**{action['label']}** — {action['hint']}")
     return discord.Embed(title="Game controls", description="\n".join(lines), color=discord.Color.blurple())
@@ -123,6 +138,12 @@ class AdminActionsView(discord.ui.View):
             if counts is not None:
                 msg += f" Updated {result.get('updated', 0)} channel(s). Counts: {counts}"
             await interaction.followup.send(msg, ephemeral=True)
+            # Refresh the panel embed so the current-mode line stays accurate.
+            if action == "toggle_auto_mode" and interaction.message and interaction.guild:
+                try:
+                    await interaction.message.edit(embed=admin_actions_embed(interaction.guild))
+                except Exception:
+                    pass
         except Exception as exc:
             await interaction.followup.send(f"Action failed: {exc}", ephemeral=True)
         finally:
@@ -152,7 +173,7 @@ async def refresh_admin_actions_panel(guild: discord.Guild, bot: commands.Bot) -
         except discord.HTTPException as exc:
             print(f"[admin_actions] Delete failed {message.id}: {exc}", flush=True)
 
-    panel = await channel.send(embed=admin_actions_embed(), view=AdminActionsView(bot))
+    panel = await channel.send(embed=admin_actions_embed(guild), view=AdminActionsView(bot))
     print(
         f"[admin_actions] Posted panel in channel_id={channel.id} "
         f"(deleted {removed} old bot message(s), message_id={panel.id})",

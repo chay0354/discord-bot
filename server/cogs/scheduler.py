@@ -460,6 +460,18 @@ class SchedulerCog(commands.Cog):
     async def _before_winner_sync_loop(self) -> None:
         await self.bot.wait_until_ready()
 
+    async def _auto_mode_on(self, guild: discord.Guild) -> bool:
+        """True when scheduled time-based automation should run for this guild.
+
+        In manual mode (auto off), the Monday/Tuesday/Friday transitions and the
+        offline catch-up are skipped — the game is driven entirely by the admin
+        buttons, which anchor the 24h window to the moment they are pressed.
+        """
+        try:
+            return await asyncio.to_thread(database.get_auto_mode, guild.id)
+        except Exception:
+            return True
+
     async def _announce_mod(self, guild: discord.Guild, title: str, desc: str, color: discord.Color):
         ch = _find_text_channel(guild, "mod")
         if not ch:
@@ -738,6 +750,9 @@ class SchedulerCog(commands.Cog):
 
     async def _monday_open_all_guilds(self):
         for g in list(self.bot.guilds):
+            if not await self._auto_mode_on(g):
+                print(f"[scheduler] Monday open skipped (manual mode) for {g.id}", flush=True)
+                continue
             try:
                 await self._monday_open_one_guild(g)
             except Exception as e:
@@ -768,6 +783,9 @@ class SchedulerCog(commands.Cog):
 
     async def _tuesday_early_close_all_guilds(self) -> None:
         for guild in list(self.bot.guilds):
+            if not await self._auto_mode_on(guild):
+                print(f"[scheduler] Early-window close skipped (manual mode) for {guild.id}", flush=True)
+                continue
             await self._tuesday_early_close_one_guild(guild)
 
     async def _reopen_ticker_channels(
@@ -1542,6 +1560,9 @@ class SchedulerCog(commands.Cog):
 
     async def _friday_close_all_guilds(self) -> None:
         for guild in list(self.bot.guilds):
+            if not await self._auto_mode_on(guild):
+                print(f"[scheduler] Friday close skipped (manual mode) for {guild.id}", flush=True)
+                continue
             try:
                 await self._friday_close_one_guild(guild)
             except Exception as e:
@@ -1554,6 +1575,9 @@ class SchedulerCog(commands.Cog):
         close ends the early window. Each step re-reads ``game_cycles`` when needed.
         """
         now_utc = _now_utc()
+        if not await self._auto_mode_on(guild):
+            print(f"[scheduler] reconcile skipped (manual mode) for {guild.id}", flush=True)
+            return
         week_key = database.week_key_for(now_utc)
         try:
             cycle = await asyncio.to_thread(database.ensure_cycle, guild.id, week_key)

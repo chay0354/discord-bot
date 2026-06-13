@@ -26,6 +26,11 @@ const ACTIONS: { id: string; label: string; hint: string }[] = [
     label: "Reset WINNER grants",
     hint: "Clears every Discord WINNER role and any active DB grants. Normal duration is one week (not 24h).",
   },
+  {
+    id: "toggle_auto_mode",
+    label: "Toggle Auto/Manual",
+    hint: "AUTO runs the weekly schedule by time. MANUAL pauses it and anchors the 24h window to the Start buttons.",
+  },
 ];
 
 type LbRow = {
@@ -229,6 +234,9 @@ export default function App() {
               {cycle?.ticker_selection_open && <span className="pill">Picks open</span>}
               <span className={`pill ${status.bot_connected ? "pill-live" : "pill-dead"}`}>
                 {status.bot_connected ? "Bot online" : "Bot offline"}
+              </span>
+              <span className={`pill ${status.auto_mode ? "pill-phase" : "pill-dead"}`}>
+                {status.auto_mode ? "Auto mode" : "Manual mode"}
               </span>
             </>
           )}

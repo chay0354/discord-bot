@@ -191,6 +191,47 @@ def early_window_end_utc() -> Optional[datetime]:
     return _early_window_start_utc + timedelta(hours=24)
 
 
+def _parse_iso_utc(raw: object) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def early_window_active_from_cycle(
+    *,
+    early_window_open: object,
+    start_at: object,
+    end_at: object,
+    now_utc: Optional[datetime] = None,
+) -> bool:
+    """Authoritative early-window check from persisted cycle fields.
+
+    The 24h winner window is anchored to the recorded start (manual button press
+    or Monday 09:00 ET). Reading it from the cycle — rather than the in-memory
+    timer — means votes are tagged ``is_early`` correctly even if the live bot
+    never armed the in-memory window (e.g. after a restart, or when a separate
+    process started the vote phase).
+    """
+    if not early_window_open:
+        return False
+    now = (now_utc or datetime.now(tz=UTC)).astimezone(UTC)
+    start = _parse_iso_utc(start_at)
+    end = _parse_iso_utc(end_at)
+    if start is None and end is not None:
+        start = end - timedelta(hours=24)
+    if start is None:
+        return False
+    if end is None:
+        end = start + timedelta(hours=24)
+    return start <= now < end
+
+
 def _record_early_vote_if_applicable(cat: int, member: discord.Member, ticker: str) -> None:
     """
     Only NPC votes during the first 24h are tracked here.
@@ -761,7 +802,14 @@ class WeeklyVotingView(discord.ui.View):
                     save_key,
                 )
 
-            is_early = is_early_window_active() and role_at_vote == "NPC"
+            # Prefer the persisted window timing (survives restarts / separate
+            # manual-start processes); fall back to the in-memory timer.
+            early_active = early_window_active_from_cycle(
+                early_window_open=ctx.get("early_window_open"),
+                start_at=ctx.get("early_window_start_at"),
+                end_at=ctx.get("early_window_end_at"),
+            ) or is_early_window_active()
+            is_early = early_active and role_at_vote == "NPC"
             ok, reason = await asyncio.to_thread(
                 database.record_vote,
                 guild.id,
