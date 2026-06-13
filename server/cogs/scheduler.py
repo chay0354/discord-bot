@@ -1085,11 +1085,17 @@ class SchedulerCog(commands.Cog):
         week_key: str,
         winner_ids: list[int],
         valid_until_utc: datetime,
+        closed_at_utc: datetime | None = None,
     ) -> discord.Embed:
+        # Include the game close time in the title so multiple games closed in the
+        # same week (manual mode reuses one week) are logged as distinct entries.
+        title = f"Winners — Week {week_key}"
+        if closed_at_utc is not None:
+            title += f" · {_format_et(closed_at_utc)}"
         if winner_ids:
             mentions = "\n".join(f"<@{user_id}>" for user_id in winner_ids)
             return discord.Embed(
-                title=f"Winners — Week {week_key}",
+                title=title,
                 description=(
                     f"Winner(s):\n{mentions}\n\n"
                     f"Role: **{ROLE_WINNER}** (one week)\n"
@@ -1100,7 +1106,7 @@ class SchedulerCog(commands.Cog):
                 color=discord.Color.gold(),
             )
         return discord.Embed(
-            title=f"Winners — Week {week_key}",
+            title=title,
             description="No winner met all eligibility conditions.",
             color=discord.Color.dark_grey(),
         )
@@ -1112,8 +1118,16 @@ class SchedulerCog(commands.Cog):
         week_key: str,
         winner_ids: list[int],
         valid_until_utc: datetime,
+        force_new: bool = False,
+        closed_at_utc: datetime | None = None,
     ) -> None:
-        """Append (or update) one week's winner announcement — history is never cleared."""
+        """Post a winner announcement to the 1st-ranked channel.
+
+        ``force_new`` (live game close) always appends a brand-new entry so EVERY
+        game is logged — even multiple games closed in the same calendar week
+        (manual mode reuses one week). The restart backfill leaves ``force_new``
+        False and edits one message per week so it never duplicates on restart.
+        """
         winner_channel = _find_winners_channel(guild)
         if not winner_channel:
             print(
@@ -1136,7 +1150,14 @@ class SchedulerCog(commands.Cog):
             week_key=week_key,
             winner_ids=winner_ids,
             valid_until_utc=valid_until_utc,
+            closed_at_utc=closed_at_utc,
         )
+
+        if force_new:
+            # Always log this game as a new post; do not edit any prior week message.
+            await winner_channel.send(embed=embed)
+            return
+
         state_key = self._winners_week_state_key(week_key)
         row = database.get_message_state(guild.id, state_key)
         cached_id = int(row["message_id"]) if row and row.get("message_id") else None
@@ -1363,7 +1384,12 @@ class SchedulerCog(commands.Cog):
         try:
             expires_at_utc = now_utc + timedelta(days=7)
             await self._publish_last_game_winners(
-                guild, week_key=week_key, winner_ids=winners, valid_until_utc=expires_at_utc
+                guild,
+                week_key=week_key,
+                winner_ids=winners,
+                valid_until_utc=expires_at_utc,
+                force_new=True,
+                closed_at_utc=now_utc,
             )
             rpt.check(
                 "Winners were announced successfully",
