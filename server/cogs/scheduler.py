@@ -15,7 +15,7 @@ from datetime import datetime, date, time as dtime, timedelta, timezone
 from typing import Optional, List, Tuple
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import database
 from config import (
@@ -428,6 +428,7 @@ class SchedulerCog(commands.Cog):
     async def cog_load(self):
         self._task = asyncio.create_task(
             self._runner(), name="scheduler_runner")
+        self._winner_sync_loop.start()
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -443,8 +444,21 @@ class SchedulerCog(commands.Cog):
                 print(f"[scheduler] winner history sync on_ready failed for {guild.id}: {exc!r}")
 
     def cog_unload(self):
+        self._winner_sync_loop.cancel()
         if self._task and not self._task.done():
             self._task.cancel()
+
+    @tasks.loop(hours=1)
+    async def _winner_sync_loop(self) -> None:
+        for guild in list(self.bot.guilds):
+            try:
+                await self._expire_winners(guild)
+            except Exception as exc:
+                print(f"[scheduler] hourly winner sync failed for {guild.id}: {exc!r}", flush=True)
+
+    @_winner_sync_loop.before_loop
+    async def _before_winner_sync_loop(self) -> None:
+        await self.bot.wait_until_ready()
 
     async def _announce_mod(self, guild: discord.Guild, title: str, desc: str, color: discord.Color):
         ch = _find_text_channel(guild, "mod")
@@ -890,6 +904,74 @@ class SchedulerCog(commands.Cog):
         )
         return week_key
 
+    async def _restore_npc_after_winner_removal(
+        self,
+        member: discord.Member,
+        *,
+        reason: str,
+    ) -> None:
+        npc_role = discord.utils.get(member.guild.roles, name=ROLE_NPC)
+        player_role = discord.utils.get(member.guild.roles, name=ROLE_PLAYER)
+        if (
+            npc_role
+            and npc_role not in member.roles
+            and (not player_role or player_role not in member.roles)
+        ):
+            try:
+                await member.add_roles(npc_role, reason=f"{reason} — restored NPC")
+            except Exception:
+                pass
+
+    async def _sync_winner_roles(
+        self,
+        guild: discord.Guild,
+        *,
+        reason: str,
+        announce: bool = True,
+        dm_on_remove: bool = False,
+        log_reason: str = "no_active_grant",
+    ) -> int:
+        """Remove WINNER from members who no longer have an active DB grant."""
+        role = discord.utils.get(guild.roles, name=ROLE_WINNER)
+        if not role:
+            return 0
+        active_ids = database.active_winner_user_ids(guild.id)
+        player_mention = _player_channel_mention(guild)
+        removed = 0
+        for member in guild.members:
+            if role not in member.roles or member.id in active_ids:
+                continue
+            try:
+                await member.remove_roles(role, reason=reason)
+                removed += 1
+                database.log_event(
+                    guild.id,
+                    "winner_role_removed",
+                    {
+                        "discord_id": member.id,
+                        "reason": log_reason,
+                    },
+                )
+                await self._restore_npc_after_winner_removal(member, reason=reason)
+                if dm_on_remove:
+                    try:
+                        await member.send(_winner_role_removed_dm(player_mention))
+                    except Exception:
+                        pass
+            except Exception as exc:
+                print(
+                    f"[scheduler] failed to remove WINNER from {member.id} in {guild.id}: {exc!r}",
+                    flush=True,
+                )
+        if removed and announce:
+            await self._announce_mod(
+                guild,
+                "WINNER Roles Cleared",
+                f"Removed **{ROLE_WINNER}** from **{removed}** member(s) ({reason}).",
+                discord.Color.orange(),
+            )
+        return removed
+
     async def _revoke_winner_roles_for_users(
         self,
         guild: discord.Guild,
@@ -897,12 +979,10 @@ class SchedulerCog(commands.Cog):
         *,
         reason: str,
     ) -> int:
-        """Remove WINNER and restore NPC after a week reset revokes prior grants."""
+        """Remove WINNER and restore NPC for specific users (legacy helper)."""
         winner_role = discord.utils.get(guild.roles, name=ROLE_WINNER)
         if not winner_role or not user_ids:
             return 0
-        npc_role = discord.utils.get(guild.roles, name=ROLE_NPC)
-        player_role = discord.utils.get(guild.roles, name=ROLE_PLAYER)
         removed = 0
         for user_id in user_ids:
             member = guild.get_member(user_id)
@@ -911,17 +991,12 @@ class SchedulerCog(commands.Cog):
             try:
                 await member.remove_roles(winner_role, reason=reason)
                 removed += 1
-                if (
-                    npc_role
-                    and npc_role not in member.roles
-                    and (not player_role or player_role not in member.roles)
-                ):
-                    try:
-                        await member.add_roles(npc_role, reason=f"{reason} — restored NPC")
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                await self._restore_npc_after_winner_removal(member, reason=reason)
+            except Exception as exc:
+                print(
+                    f"[scheduler] failed to revoke WINNER for {user_id} in {guild.id}: {exc!r}",
+                    flush=True,
+                )
         return removed
 
     async def _expire_winners(self, guild: discord.Guild) -> int:
@@ -947,32 +1022,35 @@ class SchedulerCog(commands.Cog):
                             "expires_at": row.get("expires_at"),
                         },
                     )
-                    npc_role = discord.utils.get(guild.roles, name=ROLE_NPC)
-                    player_role = discord.utils.get(guild.roles, name=ROLE_PLAYER)
-                    if (
-                        npc_role
-                        and npc_role not in member.roles
-                        and (not player_role or player_role not in member.roles)
-                    ):
-                        try:
-                            await member.add_roles(npc_role, reason="WINNER expired — restored NPC")
-                        except Exception:
-                            pass
+                    await self._restore_npc_after_winner_removal(
+                        member, reason="WINNER role expired"
+                    )
                     try:
                         await member.send(_winner_role_removed_dm(player_mention))
                     except Exception:
                         pass
-                except Exception:
-                    pass
+                except Exception as exc:
+                    print(
+                        f"[scheduler] failed to expire WINNER for {user_id} in {guild.id}: {exc!r}",
+                        flush=True,
+                    )
             database.mark_winner_removed(int(row["id"]))
-        if removed:
+        orphan_removed = await self._sync_winner_roles(
+            guild,
+            reason="WINNER role expired (no active grant)",
+            announce=False,
+            dm_on_remove=False,
+            log_reason="expired_or_revoked",
+        )
+        total = removed + orphan_removed
+        if total:
             await self._announce_mod(
                 guild,
                 "WINNER Roles Expired",
-                f"Removed **{ROLE_WINNER}** from **{removed}** member(s) whose one-week grant ended.",
+                f"Removed **{ROLE_WINNER}** from **{total}** member(s) whose grant ended or was revoked.",
                 discord.Color.orange(),
             )
-        return removed
+        return total
 
     def _winners_week_state_key(self, week_key: str) -> str:
         return f"winners_week:{week_key}"

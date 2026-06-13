@@ -123,10 +123,12 @@ async def run_action(
 
     if action in ("reset_winner_grants", "reset_winner"):
         revoked_ids = database.revoke_all_active_winner_grants(target.id)
-        roles_removed = await scheduler._revoke_winner_roles_for_users(
+        roles_removed = await scheduler._sync_winner_roles(
             target,
-            revoked_ids,
             reason="Manual admin reset of WINNER grants",
+            announce=True,
+            dm_on_remove=False,
+            log_reason="manual_reset",
         )
         database.log_event(
             target.id,
@@ -138,18 +140,29 @@ async def run_action(
                 "user_ids": revoked_ids,
             },
         )
-        if not revoked_ids:
+        if roles_removed == 0 and not revoked_ids:
             return {
                 "ok": True,
-                "message": "No active WINNER grants to reset.",
+                "message": "No active WINNER grants and no Discord WINNER roles to reset.",
             }
-        mentions = ", ".join(f"<@{uid}>" for uid in revoked_ids)
+        if roles_removed == 0:
+            return {
+                "ok": True,
+                "message": (
+                    f"Revoked {len(revoked_ids)} active grant(s) in the database, "
+                    "but no Discord WINNER roles were found."
+                ),
+            }
         return {
             "ok": True,
             "message": (
-                f"Revoked {len(revoked_ids)} active WINNER grant(s) and removed "
-                f"{roles_removed} Discord role(s): {mentions}. "
-                "Normal expiry remains Friday close → next Friday close."
+                f"Removed WINNER from {roles_removed} member(s)"
+                + (
+                    f" and revoked {len(revoked_ids)} active grant(s) in the database."
+                    if revoked_ids
+                    else " (database grants were already cleared)."
+                )
+                + " Normal expiry is one week from award until the next Friday close."
             ),
         }
 

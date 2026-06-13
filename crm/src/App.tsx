@@ -24,7 +24,7 @@ const ACTIONS: { id: string; label: string; hint: string }[] = [
   {
     id: "reset_winner_grants",
     label: "Reset WINNER grants",
-    hint: "Manual testing only. Normally WINNER lasts until next Friday close — use this when you want to clear it early.",
+    hint: "Clears every Discord WINNER role and any active DB grants. Normal duration is one week (not 24h).",
   },
 ];
 
