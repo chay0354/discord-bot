@@ -407,7 +407,7 @@ class BillingCog(commands.Cog):
         try:
             await member.add_roles(role, reason="New member default role")
             database.log_event(
-                guild.id,
+                member.guild.id,
                 "npc_role_granted",
                 {"discord_id": member.id, "reason": "member_join_auto"},
             )
@@ -444,6 +444,14 @@ class BillingCog(commands.Cog):
             if member.bot:
                 continue
             existing = {r.name.upper() for r in member.roles}
+            # Heal legacy conflicts: a PLAYER/WINNER must not also carry NPC,
+            # otherwise channel overwrites collide (NPC 'view' allow leaks the
+            # subscribe funnel past the PLAYER deny).
+            if ROLE_NPC.upper() in existing and (
+                {ROLE_PLAYER.upper(), ROLE_WINNER.upper()} & existing
+            ):
+                keep = ROLE_PLAYER if ROLE_PLAYER.upper() in existing else ROLE_WINNER
+                await self._strip_conflicting_roles(member, keep=keep, reason="npc_reconcile")
             if {ROLE_PLAYER.upper(), ROLE_WINNER.upper(), ROLE_NPC.upper()} & existing:
                 continue
             # Don't override paid members; promote them to PLAYER instead.
@@ -494,6 +502,43 @@ class BillingCog(commands.Cog):
                 return False
         return False
 
+    async def _strip_conflicting_roles(
+        self,
+        member: discord.Member,
+        *,
+        keep: str,
+        reason: str,
+    ) -> None:
+        """Enforce single-tier membership: a member may hold exactly one of
+        {NPC, PLAYER, WINNER} at a time (ADMIN is orthogonal staff). Removes
+        every tier role except ``keep``.
+
+        Holding two tier roles at once produces ambiguous channel access — e.g.
+        a member with NPC+PLAYER still sees the subscribe/upsell channel because
+        the NPC ``view`` allow overrides the PLAYER ``view`` deny — and would
+        otherwise rely on snapshot precedence to stay eligibility-correct. We
+        keep the role state itself clean so permissions are never contradictory.
+        """
+        keep_upper = keep.upper()
+        for role_name in (ROLE_NPC, ROLE_PLAYER, ROLE_WINNER):
+            if role_name.upper() == keep_upper:
+                continue
+            role = discord.utils.get(member.roles, name=role_name)
+            if not role:
+                continue
+            try:
+                await member.remove_roles(role, reason=f"{reason} — single-tier cleanup")
+                database.log_event(
+                    member.guild.id,
+                    "tier_role_cleanup",
+                    {"discord_id": member.id, "removed": role_name, "kept": keep, "reason": reason},
+                )
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                print(
+                    f"[billing] could not strip {role_name} from {member.id}: {exc!r}",
+                    flush=True,
+                )
+
     async def _set_player_role(
         self,
         discord_id: int,
@@ -537,6 +582,9 @@ class BillingCog(commands.Cog):
                         "player_role_granted",
                         {"discord_id": discord_id, "reason": reason},
                     )
+                    # PLAYER supersedes NPC/WINNER — drop them so the member
+                    # holds a single, unambiguous tier role.
+                    await self._strip_conflicting_roles(member, keep=ROLE_PLAYER, reason=reason)
                 elif not active and role in member.roles:
                     await member.remove_roles(role, reason=reason)
                     changed = True
