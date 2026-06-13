@@ -73,11 +73,13 @@ async def run_action(
     week_key = database.week_key_for()
 
     if action in ("start_pre_vote", "start_pre_voting"):
-        cycle = database.ensure_cycle(target.id, week_key)
-        status = str(cycle.get("status") or "")
-        if cycle.get("voting_open") or status == "voting":
-            await scheduler._friday_close_one_guild(target)
-        elif status != "closed":
+        # Close whatever game is actually live so winners are tallied and the
+        # WINNER role is granted BEFORE we wipe and restart. The open voting
+        # cycle is authoritative — using the calendar week here would miss a
+        # vote stage opened on a different week (manual/weekend starts) and
+        # silently skip winner computation.
+        ended_week = database.open_voting_week_key(target.id)
+        if ended_week:
             await scheduler._friday_close_one_guild(target)
         selection_week = await scheduler._restart_pre_voting_one_guild(
             target, actor_id=actor_id, manual=True
@@ -86,16 +88,20 @@ async def run_action(
             target.id,
             "start_pre_vote",
             {
-                "ended_week": week_key,
+                "ended_week": ended_week,
                 "pre_vote_week": selection_week,
                 "actor_id": actor_id,
                 "manual": True,
             },
         )
-        return {
-            "ok": True,
-            "message": f"Week {week_key} ended. Pre-vote opened for {selection_week} (timer starts now).",
-        }
+        if ended_week:
+            message = (
+                f"Ended the live vote for {ended_week} (winners tallied and WINNER "
+                f"roles granted). Pre-vote opened for {selection_week} (timer starts now)."
+            )
+        else:
+            message = f"Pre-vote opened for {selection_week} (timer starts now)."
+        return {"ok": True, "message": message}
 
     if action in ("start_vote", "start_voting", "end_pre_start_voting"):
         updated, counts = await scheduler._monday_open_one_guild(target, manual=True)
