@@ -495,7 +495,11 @@ class SchedulerCog(commands.Cog):
         Returns (updated_weekly_count, per_category_counts).
         """
         now_utc = _now_utc()
-        week_key = database.week_key_for(now_utc)
+        # Vote on the week users actually built a ballot for. The open pre-vote
+        # cycle is authoritative; on the normal Monday automation it equals the
+        # calendar week, while manual/weekend starts avoid a voting/selection
+        # week split (the root cause of "already submitted"/ballot mismatches).
+        week_key = database.open_ticker_selection_week_key(guild.id) or database.week_key_for(now_utc)
         title = (
             f"Vote Start (Manual) — Week {week_key} ({_format_et(now_utc)})"
             if manual
@@ -745,7 +749,7 @@ class SchedulerCog(commands.Cog):
                 )
 
     async def _tuesday_early_close_one_guild(self, guild: discord.Guild) -> None:
-        week_key = database.week_key_for(_now_utc())
+        week_key = database.open_voting_week_key(guild.id) or database.week_key_for(_now_utc())
         database.set_cycle_phase(
             guild.id,
             week_key,
@@ -774,7 +778,10 @@ class SchedulerCog(commands.Cog):
     ) -> dict[str, int]:
         """Reopen the CHOOSE YOUR TICKER channels. Returns verifiable counts."""
         next_week_key = selection_week_key or database.ticker_selection_week_key_for(_now_utc())
+        database.close_open_ticker_selection_cycles(guild.id, except_week_key=next_week_key)
         database.ensure_cycle(guild.id, next_week_key)
+        database.reset_week_game_data(guild.id, next_week_key)
+        reset_picker_runtime_state()
         database.set_cycle_phase(
             guild.id,
             next_week_key,
@@ -821,13 +828,12 @@ class SchedulerCog(commands.Cog):
     ) -> str:
         """Restart pre-vote ticker selection. Returns the active selection ``week_key``."""
         now_utc = _now_utc()
-        if manual:
-            week_key = database.week_key_for(now_utc)
-        else:
-            week_key = database.ticker_selection_week_key_for(now_utc)
+        week_key = database.ticker_selection_week_key_for(now_utc)
+        if not manual:
             cycle = database.ensure_cycle(guild.id, week_key)
             if str(cycle.get("status") or "") == "closed":
                 week_key = database.next_week_key_for(now_utc)
+        database.close_open_ticker_selection_cycles(guild.id, except_week_key=week_key)
         database.ensure_cycle(guild.id, week_key)
         database.reset_week_game_data(guild.id, week_key)
         reset_picker_runtime_state()
@@ -1188,7 +1194,10 @@ class SchedulerCog(commands.Cog):
 
     async def _friday_close_one_guild(self, guild: discord.Guild) -> "StepReport":
         now_utc = _now_utc()
-        week_key = database.week_key_for(now_utc)
+        # Close whatever voting week is actually open. Manual starts may open a
+        # week that differs from the calendar week; falling back to the calendar
+        # week keeps the normal Friday automation unchanged.
+        week_key = database.open_voting_week_key(guild.id) or database.week_key_for(now_utc)
         rpt = StepReport(f"Friday Close — Week {week_key} ({_format_et(now_utc)})")
 
         # 1) Mark the weekly cycle closed.

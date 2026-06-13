@@ -282,7 +282,7 @@ def open_ticker_selection_week_key(guild_id: int) -> str | None:
     """Week key for the guild's currently open pre-vote cycle, if any."""
     row = _single(
         "game_cycles",
-        f"?select=week_key&guild_id=eq.{guild_id}&ticker_selection_open=eq.true&limit=1",
+        f"?select=week_key&guild_id=eq.{guild_id}&ticker_selection_open=eq.true&order=week_key.desc&limit=1",
     )
     if row and row.get("week_key"):
         return str(row["week_key"])
@@ -293,7 +293,7 @@ def open_voting_week_key(guild_id: int) -> str | None:
     """Week key for the guild's currently open voting cycle, if any."""
     row = _single(
         "game_cycles",
-        f"?select=week_key&guild_id=eq.{guild_id}&voting_open=eq.true&limit=1",
+        f"?select=week_key&guild_id=eq.{guild_id}&voting_open=eq.true&order=week_key.desc&limit=1",
     )
     if row and row.get("week_key"):
         return str(row["week_key"])

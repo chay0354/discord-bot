@@ -1308,7 +1308,12 @@ class WeeklyPicksCog(commands.Cog):
 
         # compute early window end if armed
         end_utc = early_window_end_utc()
-        week_key = database.week_key_for()
+        # Vote on the open pre-vote ballot when present so this never opens a
+        # voting week that differs from the week users picked tickers for.
+        week_key = (
+            database.open_ticker_selection_week_key(ctx.guild.id)
+            or database.week_key_for()
+        )
         database.set_cycle_phase(
             ctx.guild.id,
             week_key,
@@ -1408,7 +1413,8 @@ class WeeklyPicksCog(commands.Cog):
             return
 
         guild = ctx.guild
-        week_key = database.week_key_for()
+        week_key = database.ticker_selection_week_key_for_guild(guild.id)
+        database.close_open_ticker_selection_cycles(guild.id, except_week_key=week_key)
         database.set_cycle_phase(
             guild.id,
             week_key,

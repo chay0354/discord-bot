@@ -42,13 +42,19 @@ def main() -> int:
     if "database.vote_counts" not in src_post:
         fails.append("live board must read counts from DB")
 
+    # Vote persistence is DB-first: the vote is saved via record_vote BEFORE the
+    # live count updates, so the leaderboard only refreshes after a confirmed
+    # save (no optimistic increment that would need reverting on failure).
     src_fin = inspect.getsource(
-        __import__("cogs.weekly_picks", fromlist=["WeeklyVotingView"]).WeeklyVotingView._finalize_vote_background
+        __import__("cogs.weekly_picks", fromlist=["WeeklyVotingView"]).WeeklyVotingView._persist_vote
     )
+    if "database.record_vote" not in src_fin:
+        fails.append("vote persistence must save to DB via record_vote")
     if "_schedule_leaderboard_update" not in src_fin:
         fails.append("vote finalize must schedule leaderboard update")
-    if "_revert_optimistic_vote" not in src_fin:
-        fails.append("failed votes must revert optimistic counts")
+    # The leaderboard update must come AFTER a successful save, not before.
+    if src_fin.index("record_vote") > src_fin.index("_schedule_leaderboard_update"):
+        fails.append("leaderboard must update only after the vote is saved")
 
     src_sched = inspect.getsource(
         __import__("cogs.scheduler", fromlist=["SchedulerCog"]).SchedulerCog._friday_close_one_guild
@@ -62,10 +68,10 @@ def main() -> int:
             print(f"  • {f}")
         return 1
     print("SECTION 7 LOGIC: PASS")
-    print("  • 3 category-specific live channels")
-    print("  • DB-backed counts; update only after successful vote save")
-    print("  • Tie display: vote desc, then ticker A→Z")
-    print("  • No user PII in embed; Friday close purges live boards")
+    print("  - 3 category-specific live channels")
+    print("  - DB-first vote save; leaderboard updates only after confirmed save")
+    print("  - Tie display: vote desc, then ticker A-Z")
+    print("  - No user PII in embed; Friday close purges live boards")
     return 0
 
 
