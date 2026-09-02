@@ -52,6 +52,52 @@ def create_checkout_session(discord_id: int, username: str) -> str:
     return data["url"]
 
 
+def create_extra_votes_checkout_session(
+    discord_id: int,
+    username: str,
+    *,
+    week_key: str,
+    guild_id: int,
+    pack_size: int,
+    amount_cents: int,
+    price_id: str | None = None,
+) -> str:
+    """One-time checkout that grants extra votes (not a PLAYER subscription)."""
+    settings = _settings()
+    data: dict[str, str] = {
+        "mode": "payment",
+        "client_reference_id": str(discord_id),
+        "success_url": settings.success_url,
+        "cancel_url": settings.cancel_url,
+        "metadata[kind]": "extra_votes",
+        "metadata[discord_id]": str(discord_id),
+        "metadata[discord_username]": username,
+        "metadata[week_key]": week_key,
+        "metadata[guild_id]": str(guild_id),
+        "metadata[pack_size]": str(pack_size),
+        "allow_promotion_codes": "false",
+    }
+    if price_id or settings.extra_votes_price_id:
+        data["line_items[0][price]"] = str(price_id or settings.extra_votes_price_id)
+        data["line_items[0][quantity]"] = "1"
+    else:
+        data["line_items[0][quantity]"] = "1"
+        data["line_items[0][price_data][currency]"] = "usd"
+        data["line_items[0][price_data][unit_amount]"] = str(max(50, int(amount_cents)))
+        data["line_items[0][price_data][product_data][name]"] = (
+            f"+{pack_size} extra vote(s) per category — week {week_key}"
+        )
+    response = requests.post(
+        f"{STRIPE_API}/checkout/sessions",
+        auth=(settings.secret_key, ""),
+        data=data,
+        timeout=15,
+    )
+    if response.status_code >= 400:
+        raise StripeClientError(f"Stripe extra-votes checkout failed: {response.status_code} {response.text}")
+    return response.json()["url"]
+
+
 def create_billing_portal_session(customer_id: str) -> str:
     settings = _settings()
     response = requests.post(

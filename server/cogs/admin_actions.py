@@ -7,6 +7,7 @@ from discord.ext import commands
 
 import database
 from config import CHANNEL_ADMIN_ACTIONS, ROLE_ADMIN
+from discord_names import find_text_channel, names_match
 from game_control import run_action
 
 # Keep in sync with crm/src/App.tsx ACTIONS
@@ -39,10 +40,7 @@ def _is_admin(member: discord.Member) -> bool:
 
 
 def _find_admin_actions_channel(guild: discord.Guild) -> discord.TextChannel | None:
-    for channel in guild.text_channels:
-        if channel.name.lower() == CHANNEL_ADMIN_ACTIONS.lower():
-            return channel
-    return None
+    return find_text_channel(guild, CHANNEL_ADMIN_ACTIONS)
 
 
 def admin_actions_embed(guild: discord.Guild | None = None) -> discord.Embed:
@@ -211,7 +209,7 @@ class AdminActionsCog(commands.Cog):
     @commands.guild_only()
     async def admin_actions_panel(self, ctx: commands.Context) -> None:
         """ADMIN: delete old panels and post Start pre-vote / Start vote (run in #admin-actions)."""
-        if ctx.channel.name.lower() != CHANNEL_ADMIN_ACTIONS:
+        if not names_match(ctx.channel.name, CHANNEL_ADMIN_ACTIONS):
             await ctx.send(f"Please run this in **#{CHANNEL_ADMIN_ACTIONS}**.")
             return
         ch = await refresh_admin_actions_panel(ctx.guild, self.bot)

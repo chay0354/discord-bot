@@ -18,6 +18,7 @@ import discord
 from discord.ext import commands, tasks
 
 import database
+from discord_names import find_game_role, find_text_channel, member_role_keys
 from config import (
     CATEGORY_TITLES,
     CHANNEL_BLUE_LIVE,
@@ -38,6 +39,7 @@ from config import (
     ROLE_PLAYER,
     ROLE_WINNER,
     TICKER_LIMIT_PER_CATEGORY,
+    WINNER_BONUS_VOTES,
 )
 # --- Pull the primitives we already have in other cogs ---
 # Early-window state + voting UI + leaderboards + helpers
@@ -209,10 +211,7 @@ def _friday_4pm_et_for_week(dt_utc: datetime) -> datetime:
 # --- Local helpers ---
 
 def _find_text_channel(guild: discord.Guild, name: str) -> Optional[discord.TextChannel]:
-    for ch in guild.text_channels:
-        if ch.name.lower() == name.lower():
-            return ch
-    return None
+    return find_text_channel(guild, name)
 
 
 def _normalize_channel_name(name: str) -> str:
@@ -261,7 +260,9 @@ def _winner_role_dm(valid_until_utc: datetime) -> str:
         "CONGRATULATIONS! 🎉 **YOU WON THE WINNER ROLE** 🎉\n\n"
         f"Your **WINNER** role is valid for one week, starting now until **{et}**.\n\n"
         "**The WINNER role gives you the same perks as a PLAYER subscription:**\n"
-        "• **5 votes** per week in each category in the WEEKLY PICKS channels (instead of 1)\n"
+        "• **5 votes** per week in each category (you may stack them on the same ticker)\n"
+        f"• **+{WINNER_BONUS_VOTES} extra vote** next week as a win bonus\n"
+        "• Streak badge that grows with consecutive wins (🏆 → 🔥 → 💎)\n"
         "• Access to subscriber-only channels:\n"
         "  • **CHOOSE YOUR TICKER** channels — pick stocks for next week's ballot\n"
         "  • **LIVE LEADERBOARD** channels — live vote counts during the week\n"
@@ -279,10 +280,9 @@ def _winner_role_removed_dm(player_mention: str) -> str:
 
 
 def _player_channel_mention(guild: discord.Guild) -> str:
-    names = {CHANNEL_PLAYER.lower(), *(n.lower() for n in PLAYER_CHANNEL_CANDIDATES)}
-    for ch in guild.text_channels:
-        if ch.name.lower() in names:
-            return ch.mention
+    ch = find_text_channel(guild, CHANNEL_PLAYER, *PLAYER_CHANNEL_CANDIDATES)
+    if ch:
+        return ch.mention
     return f"#{CHANNEL_PLAYER}"
 
 
@@ -934,8 +934,8 @@ class SchedulerCog(commands.Cog):
         *,
         reason: str,
     ) -> None:
-        npc_role = discord.utils.get(member.guild.roles, name=ROLE_NPC)
-        player_role = discord.utils.get(member.guild.roles, name=ROLE_PLAYER)
+        npc_role = find_game_role(member.guild, "NPC")
+        player_role = find_game_role(member.guild, "PLAYER")
         if (
             npc_role
             and npc_role not in member.roles
@@ -956,7 +956,7 @@ class SchedulerCog(commands.Cog):
         log_reason: str = "no_active_grant",
     ) -> int:
         """Remove WINNER from members who no longer have an active DB grant."""
-        role = discord.utils.get(guild.roles, name=ROLE_WINNER)
+        role = find_game_role(guild, "WINNER")
         if not role:
             return 0
         active_ids = database.active_winner_user_ids(guild.id)
@@ -1004,7 +1004,7 @@ class SchedulerCog(commands.Cog):
         reason: str,
     ) -> int:
         """Remove WINNER and restore NPC for specific users (legacy helper)."""
-        winner_role = discord.utils.get(guild.roles, name=ROLE_WINNER)
+        winner_role = find_game_role(guild, "WINNER")
         if not winner_role or not user_ids:
             return 0
         removed = 0
@@ -1024,7 +1024,7 @@ class SchedulerCog(commands.Cog):
         return removed
 
     async def _expire_winners(self, guild: discord.Guild) -> int:
-        role = discord.utils.get(guild.roles, name=ROLE_WINNER)
+        role = find_game_role(guild, "WINNER")
         if not role:
             return 0
         player_mention = _player_channel_mention(guild)
@@ -1086,6 +1086,7 @@ class SchedulerCog(commands.Cog):
         winner_ids: list[int],
         valid_until_utc: datetime,
         closed_at_utc: datetime | None = None,
+        guild_id: int | None = None,
     ) -> discord.Embed:
         # Include the game close time in the title so multiple games closed in the
         # same week (manual mode reuses one week) are logged as distinct entries.
@@ -1093,15 +1094,29 @@ class SchedulerCog(commands.Cog):
         if closed_at_utc is not None:
             title += f" · {_format_et(closed_at_utc)}"
         if winner_ids:
-            mentions = "\n".join(f"<@{user_id}>" for user_id in winner_ids)
+            mention_lines = []
+            for user_id in winner_ids:
+                badge = "🏆"
+                if guild_id:
+                    try:
+                        row = database.get_message_state(
+                            guild_id, database.winner_stats_state_key(user_id)
+                        )
+                        badge = database.winner_incentive_badge((row or {}).get("payload"))
+                    except Exception:
+                        badge = "🏆"
+                mention_lines.append(f"{badge} <@{user_id}>")
+            mentions = "\n".join(mention_lines)
             return discord.Embed(
                 title=title,
                 description=(
                     f"Winner(s):\n{mentions}\n\n"
                     f"Role: **{ROLE_WINNER}** (one week)\n"
                     f"Valid until: **{_format_et(valid_until_utc)}**\n\n"
-                    "**WINNER perks:** 5 votes per category, ticker-pick channels, live leaderboards "
-                    "(same access as PLAYER for that week)."
+                    "**WINNER perks:** 5 votes per category (you may stack them on the same ticker), "
+                    "ticker-pick channels, live leaderboards, "
+                    f"plus **+{WINNER_BONUS_VOTES} extra vote** next week "
+                    "and a streak badge (🏆 / 🔥 / 💎) that grows with consecutive wins."
                 ),
                 color=discord.Color.gold(),
             )
@@ -1151,6 +1166,7 @@ class SchedulerCog(commands.Cog):
             winner_ids=winner_ids,
             valid_until_utc=valid_until_utc,
             closed_at_utc=closed_at_utc,
+            guild_id=guild.id,
         )
 
         if force_new:
@@ -1343,14 +1359,14 @@ class SchedulerCog(commands.Cog):
         # actually receive the role now. Exclude anyone who already holds an
         # active WINNER grant or who is no longer in the guild (left/banned), so
         # the announcement can never name someone who doesn't get the role.
-        winner_role = discord.utils.get(guild.roles, name=ROLE_WINNER)
+        winner_role = find_game_role(guild, "WINNER")
         active_ids = database.active_winner_user_ids(guild.id)
         winners: list[int] = []
         drop_reasons: list[str] = []
         # Contract: ONLY a pure NPC can win. A member currently holding PLAYER,
         # ADMIN or WINNER is never awarded — this is the final guard that keeps
         # subscribers/staff out even if an old vote row is stale.
-        blocking_roles = {ROLE_PLAYER.upper(), ROLE_ADMIN.upper(), ROLE_WINNER.upper()}
+        blocking_roles = {"PLAYER", "ADMIN", "WINNER"}
         present_members: dict[int, discord.Member] = {}
         for user_id in eligible:
             if user_id in active_ids:
@@ -1360,7 +1376,7 @@ class SchedulerCog(commands.Cog):
             if member is None:
                 drop_reasons.append(f"{user_id}: left/banned")
                 continue  # left or banned — never announce or award
-            held = {r.name.upper() for r in member.roles} & blocking_roles
+            held = member_role_keys(member) & blocking_roles
             if held:
                 drop_reasons.append(f"{user_id}: holds {'/'.join(sorted(held))} (not a pure NPC)")
                 continue
@@ -1379,6 +1395,19 @@ class SchedulerCog(commands.Cog):
             rpt.ok("Winners were calculated and saved", detail)
         except Exception as exc:
             rpt.fail("Winners were calculated and saved", repr(exc))
+
+        # 5b) Winner incentives (streak + next-week extra vote) before announce.
+        incentive_notes: list[str] = []
+        for user_id in winners:
+            try:
+                stats = database.record_winner_incentive(guild.id, user_id, week_key)
+                badge = database.winner_incentive_badge(stats)
+                incentive_notes.append(
+                    f"{badge} <@{user_id}> streak {stats.get('current_streak')} "
+                    f"(wins {stats.get('total_wins')}) · +{stats.get('bonus_votes')} vote next week"
+                )
+            except Exception as exc:
+                print(f"[scheduler] winner incentive failed for {user_id}: {exc!r}", flush=True)
 
         # 6) Announce winners (only the validated list that will be awarded).
         try:
@@ -1444,7 +1473,9 @@ class SchedulerCog(commands.Cog):
                     # Move the winner into WINNER for the week: drop NPC so they hold
                     # only the upgraded role. NPC is restored automatically when the
                     # WINNER grant expires (see _expire_winners).
-                    npc_role = discord.utils.get(member.roles, name=ROLE_NPC)
+                    npc_role = find_game_role(member.guild, "NPC")
+                    if npc_role and npc_role not in member.roles:
+                        npc_role = None
                     if npc_role:
                         try:
                             await member.remove_roles(

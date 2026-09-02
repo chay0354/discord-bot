@@ -38,6 +38,7 @@ from config import (
 from services.finnhub_client import FinnhubQuote, format_quote, quote_and_names_for_symbols
 # import OpenPickerView to re-open ticker channels without touching submission_ui.py
 from cogs.submission_ui import OpenPickerView
+from discord_names import find_text_channel, member_role_keys
 
 UTC = timezone.utc
 
@@ -61,10 +62,7 @@ TICKER_CHANNELS = [
 
 
 def _find_text_channel(guild: discord.Guild, name: str) -> Optional[discord.TextChannel]:
-    for ch in guild.text_channels:
-        if ch.name.lower() == name.lower():
-            return ch
-    return None
+    return find_text_channel(guild, name)
 
 
 def _category_idx_to_weekly_name(idx: int) -> str:
@@ -117,8 +115,8 @@ def _extract_tickers_from_components(msg: discord.Message) -> List[str]:
 
 # ===================== In-memory voting state =====================
 
-# per-category user votes: {category_idx: {user_id: set(tickers)}}
-_user_votes: Dict[int, Dict[int, Set[str]]] = {0: {}, 1: {}, 2: {}}
+# per-category user votes: {category_idx: {user_id: [ticker, ...]}} — repeats allowed
+_user_votes: Dict[int, Dict[int, List[str]]] = {0: {}, 1: {}, 2: {}}
 
 # per-category vote counts: {category_idx: {ticker: count}}
 _vote_counts: Dict[int, Dict[str, int]] = {0: {}, 1: {}, 2: {}}
@@ -238,8 +236,7 @@ def _record_early_vote_if_applicable(cat: int, member: discord.Member, ticker: s
     """
     if not is_early_window_active():
         return
-    role_names = {r.name.upper() for r in member.roles}
-    if "NPC" not in role_names:
+    if "NPC" not in member_role_keys(member):
         return
     bucket = _early_votes[cat].setdefault(member.id, set())
     bucket.add(ticker)
@@ -316,29 +313,33 @@ def _format_et(dt_utc: datetime) -> str:
 # ===================== Helpers for leaderboards =====================
 
 def _game_role_names(member: discord.Member) -> set[str]:
-    return {r.name.upper() for r in member.roles}
+    return member_role_keys(member)
 
 
 def _can_vote(member: discord.Member) -> bool:
     """Only members with a game role may vote (NPC / PLAYER / WINNER / ADMIN)."""
     names = _game_role_names(member)
-    return bool(
-        names
-        & {
-            ROLE_NPC.upper(),
-            ROLE_PLAYER.upper(),
-            ROLE_WINNER.upper(),
-            ROLE_ADMIN.upper(),
-        }
-    )
+    return bool(names & {"NPC", "PLAYER", "WINNER", "ADMIN"})
 
 
-def _vote_limit_for(member: discord.Member) -> int:
-    """PLAYER/WINNER/ADMIN => 5; NPC => 1; no game role => 0 (blocked by _can_vote)."""
+def _can_stack_votes(member: discord.Member) -> bool:
+    """PLAYER / WINNER / ADMIN may cast multiple votes on the same ticker."""
+    return bool(_game_role_names(member) & {"PLAYER", "WINNER", "ADMIN"})
+
+
+def _vote_limit_for(member: discord.Member, week_key: str | None = None) -> int:
+    """PLAYER/WINNER/ADMIN => 5 (+ purchased/winner bonus); NPC => 1; else 0."""
     names = _game_role_names(member)
-    if ROLE_PLAYER.upper() in names or ROLE_WINNER.upper() in names or ROLE_ADMIN.upper() in names:
-        return PLAYER_VOTES_PER_CATEGORY
-    if ROLE_NPC.upper() in names:
+    if names & {"PLAYER", "WINNER", "ADMIN"}:
+        extra = 0
+        guild = getattr(member, "guild", None)
+        if guild is not None and week_key:
+            try:
+                extra = database.extra_vote_credits(guild.id, member.id, week_key)
+            except Exception:
+                extra = 0
+        return PLAYER_VOTES_PER_CATEGORY + extra
+    if "NPC" in names:
         return NPC_VOTES_PER_CATEGORY
     return 0
 
@@ -351,18 +352,18 @@ def _role_snapshot(member: discord.Member) -> str:
     recorded as ``role_at_vote="NPC"`` and wrongly become win-eligible. Per the
     contract, **only** a pure NPC (no ADMIN/PLAYER/WINNER) can win.
     """
-    names = {r.name.upper() for r in member.roles}
-    if ROLE_ADMIN.upper() in names:
+    names = member_role_keys(member)
+    if "ADMIN" in names:
         return "ADMIN"
-    if ROLE_PLAYER.upper() in names:
+    if "PLAYER" in names:
         return "PLAYER"
-    if ROLE_WINNER.upper() in names:
+    if "WINNER" in names:
         return "WINNER"
     return "NPC"
 
 
-def _ensure_user_slot(cat: int, user_id: int) -> Set[str]:
-    return _user_votes[cat].setdefault(user_id, set())
+def _ensure_user_slot(cat: int, user_id: int) -> List[str]:
+    return _user_votes[cat].setdefault(user_id, [])
 
 
 def _inc_count(cat: int, ticker: str, delta: int = 1) -> int:
@@ -375,9 +376,9 @@ def _inc_count(cat: int, ticker: str, delta: int = 1) -> int:
 
 def _revert_optimistic_vote(cat: int, user_id: int, ticker: str) -> None:
     sym = ticker.upper()
-    user_set = _user_votes[cat].get(user_id)
-    if user_set:
-        user_set.discard(sym)
+    user_list = _user_votes[cat].get(user_id)
+    if user_list and sym in user_list:
+        user_list.remove(sym)
     counts = _vote_counts[cat]
     if sym in counts:
         counts[sym] = max(0, counts[sym] - 1)
@@ -412,7 +413,7 @@ def hydrate_vote_state(guild_id: int, week_key: str | None = None) -> None:
         sym = str(row["ticker"]).upper()
         uid = int(row["user_id"])
         _vote_counts[idx][sym] = _vote_counts[idx].get(sym, 0) + 1
-        _user_votes[idx].setdefault(uid, set()).add(sym)
+        _user_votes[idx].setdefault(uid, []).append(sym)
 
 
 def _sorted_leaderboard(cat: int) -> List[Tuple[str, int]]:
@@ -634,7 +635,7 @@ async def _post_or_update_leaderboard(guild: discord.Guild, cat: int) -> None:
 
 def _fresh_pick_results_embed() -> discord.Embed:
     emb = discord.Embed(
-        title="PICK RESULTS",
+        title="LIVE CHOSEN TICKERS",
         description=(
             f"Small / Mid / Blue weekly lists. Each category closes at {TICKER_LIMIT_PER_CATEGORY} tickers."
         ),
@@ -647,10 +648,9 @@ def _fresh_pick_results_embed() -> discord.Embed:
 
 
 async def _get_pick_results_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
-    for ch in guild.text_channels:
-        if ch.name.lower() in {CHANNEL_PICK_RESULTS.lower(), "pick-results"}:
-            return ch
-    return None
+    from config import PICK_RESULTS_CHANNEL_CANDIDATES
+
+    return find_text_channel(guild, CHANNEL_PICK_RESULTS, *PICK_RESULTS_CHANNEL_CANDIDATES)
 
 
 async def _find_pick_results_message(pr_ch: discord.TextChannel) -> Optional[Tuple[discord.Message, discord.Embed]]:
@@ -658,7 +658,7 @@ async def _find_pick_results_message(pr_ch: discord.TextChannel) -> Optional[Tup
         if msg.author == pr_ch.guild.me and msg.embeds:
             emb = msg.embeds[0]
             title = (emb.title or "").lower()
-            if "pick results" in title:
+            if "pick results" in title or "live chosen" in title or "chosen ticker" in title:
                 return msg, emb
     return None
 
@@ -783,7 +783,9 @@ class WeeklyVotingView(discord.ui.View):
                 save_key = actual_cat
                 save_cat = CATEGORIES.index(actual_cat)
 
-            if ctx["prior_vote_category"]:
+            # NPC (and anyone who cannot stack) may vote a ticker only once.
+            # PLAYER/WINNER/ADMIN may vote the same ticker again, up to their limit.
+            if ctx["prior_vote_category"] and not _can_stack_votes(member):
                 _log_vote("vote_rejected", reason="duplicate_prior")
                 return (
                     False,
@@ -823,6 +825,13 @@ class WeeklyVotingView(discord.ui.View):
             if not ok:
                 _log_vote("vote_rejected", reason=reason or "save_failed")
                 if reason == "duplicate":
+                    if _can_stack_votes(member):
+                        return (
+                            False,
+                            f"${ticker} could not be stacked right now. Ask an admin to apply the vote unique-constraint migration, then try again.",
+                            save_cat,
+                            save_key,
+                        )
                     return False, f"You already voted for ${ticker}.", save_cat, save_key
                 return (
                     False,
@@ -875,7 +884,7 @@ class WeeklyVotingView(discord.ui.View):
                 ephemeral=True,
             )
             return
-        limit = _vote_limit_for(member)
+        limit = _vote_limit_for(member, week_key)
         role_at_vote = _role_snapshot(member)
         ticker = ticker.upper().strip().lstrip("$")
 
@@ -886,23 +895,26 @@ class WeeklyVotingView(discord.ui.View):
             )
             return
 
-        user_set = _ensure_user_slot(cat, member.id)
-        mem_count = len(user_set)
+        user_list = _ensure_user_slot(cat, member.id)
+        mem_count = len(user_list)
 
-        if ticker in user_set:
+        if ticker in user_list and not _can_stack_votes(member):
             await interaction.followup.send(
-                f"You already voted for ${ticker} in this category.",
+                f"You already voted for ${ticker} in this category "
+                f"(your pick: ${ticker}).",
                 ephemeral=True,
             )
             return
 
         if limit == 1 and mem_count >= 1:
+            picked = user_list[0] if user_list else ticker
             reg_mention = _channel_mention_or_text(
                 guild,
                 list(SUBSCRIBE_CHANNEL_CANDIDATES),
                 "#subscribe",
             )
             await interaction.followup.send(
+                f"YOU ALREADY VOTED FOR ${picked} IN THIS CATEGORY. "
                 "YOU HAVE REACHED THE LIMIT OF YOUR VOTES. "
                 "NEXT VOTING OPENS MONDAY 9AM. "
                 f"IF YOU WANT TO GET MORE VOTES AND EXTRA PRESS HERE TO SUBSCRIBE: {reg_mention}",
@@ -911,8 +923,11 @@ class WeeklyVotingView(discord.ui.View):
             return
 
         if mem_count >= limit:
+            picks = ", ".join(f"${t}" for t in user_list) or "—"
             await interaction.followup.send(
-                "YOU HAVE REACHED THE LIMIT OF YOUR VOTES. NEXT VOTING OPENS MONDAY 9AM.",
+                f"YOU HAVE REACHED THE LIMIT OF YOUR VOTES ({mem_count}/{limit}). "
+                f"Your votes this category: {picks}. "
+                "NEXT VOTING OPENS MONDAY 9AM.",
                 ephemeral=True
             )
             return
@@ -931,9 +946,10 @@ class WeeklyVotingView(discord.ui.View):
             await interaction.followup.send(err_msg, ephemeral=True)
             return
 
-        user_set.add(ticker)
+        _ensure_user_slot(save_cat, member.id).append(ticker)
         _inc_count(save_cat, ticker, +1)
         new_count = len(_ensure_user_slot(save_cat, member.id))
+        on_ticker = _ensure_user_slot(save_cat, member.id).count(ticker)
 
         if limit == 1:
             reg_mention = _channel_mention_or_text(
@@ -942,14 +958,15 @@ class WeeklyVotingView(discord.ui.View):
                 "#subscribe",
             )
             await interaction.followup.send(
-                f"{_vote_confirmation_message(ticker, save_cat, new_count, limit)}\n"
-                f"Join {reg_mention} to get 5 weekly votes and see live results in real time.",
+                f"{_vote_confirmation_message(ticker, save_cat, new_count, limit, on_ticker)}\n"
+                f"Join {reg_mention} to get 5 weekly votes (you may stack them on the same ticker) "
+                "and see live results in real time.",
                 ephemeral=True,
             )
             return
 
         await interaction.followup.send(
-            _vote_confirmation_message(ticker, save_cat, new_count, limit),
+            _vote_confirmation_message(ticker, save_cat, new_count, limit, on_ticker),
             ephemeral=True,
         )
 
@@ -1054,10 +1071,17 @@ def _open_picker_embed() -> discord.Embed:
 
 # ===================== Banner helpers =====================
 
-def _vote_confirmation_message(ticker: str, cat: int, count: int, limit: int) -> str:
+def _vote_confirmation_message(
+    ticker: str,
+    cat: int,
+    count: int,
+    limit: int,
+    on_ticker: int = 1,
+) -> str:
+    stacked = f" ({on_ticker} on ${ticker})" if on_ticker > 1 else ""
     return (
-        f"YOU HAVE PICKED ${ticker} in **{_category_title(cat)}**\n"
-        f"YOU HAVE {count}/{limit} PICKS"
+        f"YOU HAVE PICKED ${ticker} in **{_category_title(cat)}**{stacked}\n"
+        f"YOU HAVE {count}/{limit} VOTES"
     )
 
 
@@ -1078,7 +1102,7 @@ def _banner_description_with_timer(
         "Each button shows the ticker and its current price.\n\n"
         f"**Live leaderboard:** {live_mention}\n"
         "• **NPC** — 1 vote in this category\n"
-        "• **PLAYER / WINNER** — up to 5 votes (different tickers)\n\n"
+        "• **PLAYER / WINNER** — up to 5 votes (you may put multiple votes on the same ticker)\n\n"
         "**Voting closes:** Friday at **4:00 PM ET** (market close)."
     )
     if end_utc is None:
@@ -1133,22 +1157,35 @@ async def build_final_leaderboard_embeds(guild_id: int, week_key: str) -> list[d
             )
             continue
 
+        ranked = database.rank_leaderboard_with_tiebreak(
+            rows, week_key=week_key, category=cat_key
+        )
         lines: list[str] = []
-        for rank, (ticker, total) in enumerate(rows, start=1):
+        any_tie = False
+        for rank, ticker, total, tied in ranked:
+            if tied:
+                any_tie = True
             nm = _truncate(names.get(ticker, "") or "", 30) or "—"
             q = format_quote(ticker, quotes.get(ticker))
-            lines.append(f"**{rank}.** `${ticker}` · {nm}\n    {q} · **{total}**")
+            note = " · tie broken at random" if tied else ""
+            lines.append(f"**{rank}.** `${ticker}` · {nm}\n    {q} · **{total}**{note}")
 
         desc = "\n\n".join(lines)
         if len(desc) > 4000:
             desc = "\n\n".join(lines[:12]) + "\n\n… *list truncated*"
+        footer = ""
+        if any_tie:
+            footer = (
+                "\n\nEqual vote totals were ranked by a random tie-break "
+                f"(seeded for week `{week_key}` so the order is stable)."
+            )
 
         embeds.append(
             discord.Embed(
                 title=f"FINAL WEEKLY LEADERBOARD — {title}",
                 description=(
                     "Results for this week — **symbol**, **company**, **price**, **votes**.\n\n"
-                    f"{desc}"
+                    f"{desc}{footer}"
                 ),
                 color=color,
             )

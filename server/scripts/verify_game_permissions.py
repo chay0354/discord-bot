@@ -16,6 +16,7 @@ load_dotenv(ROOT / ".env")
 
 import discord
 
+from discord_names import find_game_role, find_text_channel
 from config import (
     CHANNEL_BLUE_LIVE,
     CHANNEL_BLUE_TICKER,
@@ -47,11 +48,11 @@ SUBSCRIBER_ONLY_CHANNELS = (
 
 
 def _role(guild: discord.Guild, name: str) -> discord.Role | None:
-    return discord.utils.get(guild.roles, name=name)
+    return find_game_role(guild, name) or discord.utils.get(guild.roles, name=name)
 
 
 def _channel(guild: discord.Guild, name: str) -> discord.TextChannel | None:
-    return discord.utils.get(guild.text_channels, name=name)
+    return find_text_channel(guild, name)
 
 
 class GamePermissionVerifier(discord.Client):

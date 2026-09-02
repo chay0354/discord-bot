@@ -10,9 +10,11 @@ import requests
 
 from config import (
     CATEGORIES,
+    EXTRA_VOTE_PACK_SIZE,
     SUPABASE_SERVICE_ROLE_KEY,
     SUPABASE_URL,
     TICKER_LIMIT_PER_CATEGORY,
+    WINNER_BONUS_VOTES,
 )
 
 
@@ -826,8 +828,155 @@ def vote_counts(guild_id: int, week_key: str, category: str) -> list[tuple[str, 
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
 
+def rank_leaderboard_with_tiebreak(
+    counts: list[tuple[str, int]],
+    *,
+    week_key: str,
+    category: str,
+) -> list[tuple[int, str, int, bool]]:
+    """Assign sequential ranks. Equal vote totals are shuffled with a
+    reproducible seed (week + category + vote total) so the final board
+    has a single 1st/2nd/... instead of an unresolved tie."""
+    import hashlib
+    import random
+
+    if not counts:
+        return []
+    groups: list[tuple[int, list[str]]] = []
+    for ticker, total in counts:
+        if not groups or groups[-1][0] != total:
+            groups.append((total, [ticker]))
+        else:
+            groups[-1][1].append(ticker)
+    out: list[tuple[int, str, int, bool]] = []
+    rank = 1
+    for total, tickers in groups:
+        tied = len(tickers) > 1
+        ordered = list(tickers)
+        if tied:
+            seed = hashlib.sha256(f"{week_key}|{category}|{total}".encode()).hexdigest()
+            random.Random(seed).shuffle(ordered)
+        for ticker in ordered:
+            out.append((rank, ticker, total, tied))
+            rank += 1
+    return out
+
+
 def all_vote_counts(guild_id: int, week_key: str) -> dict[str, list[tuple[str, int]]]:
     return {cat: vote_counts(guild_id, week_key, cat) for cat in CATEGORIES}
+
+
+def extra_votes_state_key(user_id: int) -> str:
+    return f"extra_votes:{int(user_id)}"
+
+
+def winner_stats_state_key(user_id: int) -> str:
+    return f"winner_stats:{int(user_id)}"
+
+
+def extra_vote_credits(guild_id: int, user_id: int, week_key: str) -> int:
+    """Extra votes this user may cast per category in ``week_key``."""
+    try:
+        row = get_message_state(guild_id, extra_votes_state_key(user_id))
+    except Exception:
+        return 0
+    payload = (row or {}).get("payload") or {}
+    by_week = payload.get("credits_by_week") or {}
+    try:
+        return max(0, int(by_week.get(week_key) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def add_extra_vote_credits(
+    guild_id: int,
+    user_id: int,
+    week_key: str,
+    amount: int,
+    *,
+    source: str,
+) -> int:
+    """Add extra vote credits for ``week_key``. Returns the new total for that week."""
+    key = extra_votes_state_key(user_id)
+    row = get_message_state(guild_id, key) or {}
+    payload = dict(row.get("payload") or {})
+    by_week = dict(payload.get("credits_by_week") or {})
+    current = 0
+    try:
+        current = int(by_week.get(week_key) or 0)
+    except (TypeError, ValueError):
+        current = 0
+    new_total = max(0, current + int(amount))
+    by_week[week_key] = new_total
+    payload["credits_by_week"] = by_week
+    payload["lifetime"] = int(payload.get("lifetime") or 0) + max(0, int(amount))
+    history = list(payload.get("history") or [])
+    history.append({"week_key": week_key, "amount": int(amount), "source": source, "at": utc_now_iso()})
+    payload["history"] = history[-40:]
+    save_message_state(guild_id, key, channel_id=None, message_id=None, payload=payload)
+    return new_total
+
+
+def record_winner_incentive(
+    guild_id: int,
+    user_id: int,
+    week_key: str,
+) -> dict[str, Any]:
+    """Update streak / total-wins and grant the next-week vote bonus."""
+    key = winner_stats_state_key(user_id)
+    row = get_message_state(guild_id, key) or {}
+    payload = dict(row.get("payload") or {})
+    last_week = str(payload.get("last_week_key") or "")
+    streak = int(payload.get("current_streak") or 0)
+    if last_week and last_week != week_key:
+        # Consecutive ISO weeks keep the streak; otherwise reset to 1.
+        try:
+            last_year, last_w = last_week.split("-W")
+            cur_year, cur_w = week_key.split("-W")
+            consecutive = (int(cur_year) == int(last_year) and int(cur_w) == int(last_w) + 1) or (
+                int(cur_year) == int(last_year) + 1 and int(last_w) >= 52 and int(cur_w) == 1
+            )
+        except Exception:
+            consecutive = False
+        streak = streak + 1 if consecutive else 1
+    elif last_week == week_key:
+        pass
+    else:
+        streak = 1
+    total_wins = int(payload.get("total_wins") or 0) + (0 if last_week == week_key else 1)
+    payload.update(
+        {
+            "total_wins": total_wins,
+            "current_streak": streak,
+            "last_week_key": week_key,
+            "updated_at": utc_now_iso(),
+        }
+    )
+    save_message_state(guild_id, key, channel_id=None, message_id=None, payload=payload)
+    next_week = next_week_key_for()
+    if last_week != week_key and WINNER_BONUS_VOTES > 0:
+        add_extra_vote_credits(
+            guild_id,
+            user_id,
+            next_week,
+            WINNER_BONUS_VOTES,
+            source="winner_bonus",
+        )
+    return {
+        "total_wins": total_wins,
+        "current_streak": streak,
+        "bonus_week": next_week,
+        "bonus_votes": WINNER_BONUS_VOTES,
+    }
+
+
+def winner_incentive_badge(stats: dict[str, Any] | None) -> str:
+    streak = int((stats or {}).get("current_streak") or 0)
+    if streak >= 3:
+        return "💎"
+    if streak >= 2:
+        return "🔥"
+    return "🏆"
 
 
 def winning_tickers_for_week(guild_id: int, week_key: str) -> dict[str, set[str]] | None:

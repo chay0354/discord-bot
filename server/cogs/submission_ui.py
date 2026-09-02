@@ -17,12 +17,14 @@ from config import (
     CHANNEL_PICK_RESULTS,
     CHANNEL_SMALL_TICKER,
     CHANNEL_SMALL_VOTE,
+    PICK_RESULTS_CHANNEL_CANDIDATES,
     ROLE_ADMIN,
     ROLE_PLAYER,
     ROLE_WINNER,
     TICKER_CHANNEL_BY_CATEGORY,
     TICKER_LIMIT_PER_CATEGORY,
 )
+from discord_names import find_text_channel, member_role_keys, names_match, normalize_discord_name
 from services.finnhub_client import (
     resolve_symbol as finnhub_resolve_symbol,
     pop_last_error as finnhub_pop_last_error,
@@ -148,21 +150,20 @@ def _category_key_for_idx(idx: int) -> str:
 def _can_choose_weekly_ticker(member: discord.Member) -> bool:
     if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
         return True
-    names = {r.name.upper() for r in member.roles}
+    names = member_role_keys(member)
+    raw = {r.name.upper() for r in member.roles}
     admin_aliases = {ROLE_ADMIN.upper(), "BOT ADMIN", "BOT-ADMIN", "BOT_ADMIN"}
     return bool(
-        ROLE_PLAYER.upper() in names
-        or ROLE_WINNER.upper() in names
-        or names.intersection(admin_aliases)
-        or any("ADMIN" in name for name in names)
+        "PLAYER" in names
+        or "WINNER" in names
+        or names.intersection({"ADMIN"})
+        or raw.intersection(admin_aliases)
+        or any("ADMIN" in name for name in raw)
     )
 
 
 async def _get_pick_results_channel(guild: discord.Guild) -> discord.TextChannel | None:
-    for ch in guild.text_channels:
-        if ch.name.lower() in {CHANNEL_PICK_RESULTS.lower(), "pick-results"}:
-            return ch
-    return None
+    return find_text_channel(guild, CHANNEL_PICK_RESULTS, *PICK_RESULTS_CHANNEL_CANDIDATES)
 
 
 async def _find_pick_results_message(pr_ch: discord.TextChannel) -> tuple[discord.Message, discord.Embed] | None:
@@ -170,14 +171,14 @@ async def _find_pick_results_message(pr_ch: discord.TextChannel) -> tuple[discor
         if msg.author == pr_ch.guild.me and msg.embeds:
             emb = msg.embeds[0]
             title = (emb.title or "").lower()
-            if "pick results" in title:
+            if "pick results" in title or "live chosen" in title or "chosen ticker" in title:
                 return msg, emb
     return None
 
 
 def _pick_results_embed_scaffold() -> discord.Embed:
     emb = discord.Embed(
-        title="PICK RESULTS",
+        title="LIVE CHOSEN TICKERS",
         description=f"Small / Mid / Blue weekly lists. Each category closes at {TICKER_LIMIT_PER_CATEGORY} tickers.",
         color=discord.Color.gold(),
     )
@@ -407,11 +408,7 @@ async def _is_channel_closed(ch: discord.TextChannel) -> bool:
 
 def _closed_banner_embed(guild: discord.Guild, count: int = TICKER_LIMIT_PER_CATEGORY) -> discord.Embed:
     pick_results_mention = f"#{CHANNEL_PICK_RESULTS}"
-    pr_ch = None
-    for ch in guild.text_channels:
-        if ch.name.lower() in {CHANNEL_PICK_RESULTS.lower(), "pick-results"}:
-            pr_ch = ch
-            break
+    pr_ch = find_text_channel(guild, CHANNEL_PICK_RESULTS, *PICK_RESULTS_CHANNEL_CANDIDATES)
     if pr_ch:
         pick_results_mention = pr_ch.mention
 
@@ -431,10 +428,7 @@ def _closed_banner_embed(guild: discord.Guild, count: int = TICKER_LIMIT_PER_CAT
 # ---------------- small helpers: #mod logging ----------------
 
 def _find_text_channel(guild: discord.Guild, name: str) -> discord.TextChannel | None:
-    for ch in guild.text_channels:
-        if ch.name.lower() == name.lower():
-            return ch
-    return None
+    return find_text_channel(guild, name)
 
 
 async def _post_mod_log_submission_closed(
@@ -735,9 +729,9 @@ class StockPickerView(discord.ui.View):
         name = TICKER_CHANNEL_BY_CATEGORY.get(category, "")
         guild = self.channel.guild
         if name and guild:
-            for ch in guild.text_channels:
-                if ch.name.lower() == name.lower():
-                    return ch.mention
+            ch = find_text_channel(guild, name)
+            if ch:
+                return ch.mention
         return f"#{name}" if name else "the correct category channel"
 
     def _rejection_message(self, status: str, symbol: str, row: dict | None) -> str:
@@ -1159,7 +1153,10 @@ class SubmissionUICog(commands.Cog):
     @commands.command(name="prep_pick_results_demo")
     @commands.has_role("ADMIN")
     async def prep_pick_results_demo(self, ctx: commands.Context):
-        if ctx.channel.name.lower() not in {CHANNEL_PICK_RESULTS.lower(), "pick-results"}:
+        if not any(
+            names_match(ctx.channel.name, n)
+            for n in (CHANNEL_PICK_RESULTS, *PICK_RESULTS_CHANNEL_CANDIDATES)
+        ):
             await ctx.send(f"Please run this in the **#{CHANNEL_PICK_RESULTS}** channel.")
             return
         emb = _demo_pick_results_embed()
@@ -1170,7 +1167,10 @@ class SubmissionUICog(commands.Cog):
     @commands.has_role("ADMIN")
     async def fill_pick_results_20(self, ctx: commands.Context):
         """ADMIN: fill all three lists to the configured limit and broadcast closed banners."""
-        if ctx.channel.name.lower() not in {CHANNEL_PICK_RESULTS.lower(), "pick-results"}:
+        if not any(
+            names_match(ctx.channel.name, n)
+            for n in (CHANNEL_PICK_RESULTS, *PICK_RESULTS_CHANNEL_CANDIDATES)
+        ):
             await ctx.send(f"Please run this in the **#{CHANNEL_PICK_RESULTS}** channel.")
             return
 
@@ -1195,12 +1195,12 @@ class SubmissionUICog(commands.Cog):
         guild = ctx.guild
         if guild:
             name_map = {
-                CHANNEL_SMALL_TICKER: 0,
-                CHANNEL_MID_TICKER: 1,
-                CHANNEL_BLUE_TICKER: 2,
+                normalize_discord_name(CHANNEL_SMALL_TICKER): 0,
+                normalize_discord_name(CHANNEL_MID_TICKER): 1,
+                normalize_discord_name(CHANNEL_BLUE_TICKER): 2,
             }
             for ch in guild.text_channels:
-                idx = name_map.get(ch.name.lower())
+                idx = name_map.get(normalize_discord_name(ch.name))
                 if idx is None:
                     continue
                 fld = new.fields[idx] if idx < len(new.fields) else None
@@ -1240,7 +1240,7 @@ class SubmissionUICog(commands.Cog):
         for idx, tickers in enumerate(lists):
             # Find channel
             ch_name = _weekly_channel_name_for_idx(idx)
-            dest = discord.utils.get(ctx.guild.text_channels, name=ch_name)
+            dest = find_text_channel(ctx.guild, ch_name)
             if not dest:
                 await ctx.send(f"Weekly picks channel **#{ch_name}** not found. Please create it.")
                 continue

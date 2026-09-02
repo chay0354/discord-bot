@@ -7,24 +7,43 @@ from dataclasses import dataclass
 TICKER_LIMIT_PER_CATEGORY = 20
 NPC_VOTES_PER_CATEGORY = 1
 PLAYER_VOTES_PER_CATEGORY = 5
+# One Stripe pack grants this many extra votes per category for the active week.
+EXTRA_VOTE_PACK_SIZE = int(os.getenv("EXTRA_VOTE_PACK_SIZE", "1"))
+EXTRA_VOTE_PACK_CENTS = int(os.getenv("EXTRA_VOTE_PACK_CENTS", "299"))
+WINNER_BONUS_VOTES = int(os.getenv("WINNER_BONUS_VOTES", "1"))
 
-ROLE_NPC = os.getenv("ROLE_NPC", "NPC")
-ROLE_PLAYER = os.getenv("ROLE_PLAYER", "PLAYER")
-ROLE_WINNER = os.getenv("ROLE_WINNER", "WINNER")
+# Logical role keys stay NPC/PLAYER/WINNER; display names include the buyer icons.
+ROLE_NPC = os.getenv("ROLE_NPC", "🤖 NPC")
+ROLE_PLAYER = os.getenv("ROLE_PLAYER", "💎 PLAYER")
+ROLE_WINNER = os.getenv("ROLE_WINNER", "🏆 WINNER")
 ROLE_ADMIN = os.getenv("ROLE_ADMIN", "ADMIN")
 
-CHANNEL_SMALL_TICKER = "small-cap-ticker"
-CHANNEL_MID_TICKER = "mid-cap-ticker"
-CHANNEL_BLUE_TICKER = "large-cap-ticker"
-CHANNEL_PICK_RESULTS = os.getenv("PICK_RESULTS_CHANNEL", "pick-results")
+# Mathematical sans-serif LIVE / TICKER (NFKC-folds back to ascii for lookups).
+_STYLE_TICKER = "\U0001d5b3\U0001d5a8\U0001d5a2\U0001d5aa\U0001d5a4\U0001d5b1"  # 𝖳𝖨𝖢𝖪𝖤𝖱
+_STYLE_LIVE = "\U0001d5ab\U0001d5a8\U0001d5b5\U0001d5a4"  # 𝖫𝖨𝖵𝖤
 
-CHANNEL_SMALL_VOTE = "small-cap"
-CHANNEL_MID_VOTE = "mid-cap"
-CHANNEL_BLUE_VOTE = "large-cap"
+CHANNEL_SMALL_TICKER = os.getenv("CHANNEL_SMALL_TICKER", f"📊small-cap-{_STYLE_TICKER}")
+CHANNEL_MID_TICKER = os.getenv("CHANNEL_MID_TICKER", f"📈mid-cap-{_STYLE_TICKER}")
+CHANNEL_BLUE_TICKER = os.getenv("CHANNEL_BLUE_TICKER", f"🏦large-cap-{_STYLE_TICKER}")
+CHANNEL_PICK_RESULTS = os.getenv("PICK_RESULTS_CHANNEL", "✅live-chosen-tickers")
+PICK_RESULTS_CHANNEL_CANDIDATES = tuple(
+    dict.fromkeys(
+        n.strip()
+        for n in os.getenv(
+            "PICK_RESULTS_CHANNEL_CANDIDATES",
+            f"{CHANNEL_PICK_RESULTS},live-chosen-tickers,pick-results",
+        ).split(",")
+        if n.strip()
+    )
+)
 
-CHANNEL_SMALL_LIVE = "small-cap-live"
-CHANNEL_MID_LIVE = "mid-cap-live"
-CHANNEL_BLUE_LIVE = "large-cap-live"
+CHANNEL_SMALL_VOTE = os.getenv("CHANNEL_SMALL_VOTE", "🗳️small-cap")
+CHANNEL_MID_VOTE = os.getenv("CHANNEL_MID_VOTE", "🗳️mid-cap")
+CHANNEL_BLUE_VOTE = os.getenv("CHANNEL_BLUE_VOTE", "🗳️large-cap")
+
+CHANNEL_SMALL_LIVE = os.getenv("CHANNEL_SMALL_LIVE", f"🔴small-cap-{_STYLE_LIVE}")
+CHANNEL_MID_LIVE = os.getenv("CHANNEL_MID_LIVE", f"🔴mid-cap-{_STYLE_LIVE}")
+CHANNEL_BLUE_LIVE = os.getenv("CHANNEL_BLUE_LIVE", f"🔴large-cap-{_STYLE_LIVE}")
 
 CHANNEL_MOD = "mod"
 CHANNEL_ADMIN_ACTIONS = "admin-actions"
@@ -54,6 +73,27 @@ SUBSCRIBE_CHANNEL_CANDIDATES = tuple(
             "SUBSCRIBE_CHANNEL_CANDIDATES",
             "subscribe,player,registration,register,𝐏𝐋𝐀𝐘𝐄𝐑",
         ).split(",")
+        if n.strip()
+    )
+)
+# Buy extra votes (one-time Stripe pack)
+CHANNEL_EXTRA_VOTES = os.getenv("EXTRA_VOTES_CHANNEL", "extra-votes")
+EXTRA_VOTES_CHANNEL_CANDIDATES = tuple(
+    dict.fromkeys(
+        n.strip()
+        for n in os.getenv(
+            "EXTRA_VOTES_CHANNEL_CANDIDATES",
+            f"{CHANNEL_EXTRA_VOTES},buy-votes,extra-vote",
+        ).split(",")
+        if n.strip()
+    )
+)
+# Public Q&A / FAQ
+CHANNEL_QA = os.getenv("QA_CHANNEL", "q-and-a")
+QA_CHANNEL_CANDIDATES = tuple(
+    dict.fromkeys(
+        n.strip()
+        for n in os.getenv("QA_CHANNEL_CANDIDATES", f"{CHANNEL_QA},q-and-a,faq").split(",")
         if n.strip()
     )
 )
@@ -135,6 +175,8 @@ ALL_REQUIRED_CHANNELS = (
     CHANNEL_WINNERS,
     CHANNEL_SUBSCRIBE,
     CHANNEL_MANAGE_SUBSCRIPTION,
+    CHANNEL_EXTRA_VOTES,
+    CHANNEL_QA,
 )
 
 
@@ -143,6 +185,7 @@ class StripeSettings:
     secret_key: str | None = os.getenv("STRIPE_SECRET_KEY")
     webhook_secret: str | None = os.getenv("STRIPE_WEBHOOK_SECRET")
     price_id: str | None = os.getenv("STRIPE_MONTHLY_PRICE_ID")
+    extra_votes_price_id: str | None = os.getenv("STRIPE_EXTRA_VOTES_PRICE_ID")
     success_url: str = os.getenv("STRIPE_SUCCESS_URL", "https://discord.com/channels/@me")
     cancel_url: str = os.getenv("STRIPE_CANCEL_URL", "https://discord.com/channels/@me")
     portal_return_url: str = os.getenv("STRIPE_PORTAL_RETURN_URL", "https://discord.com/channels/@me")

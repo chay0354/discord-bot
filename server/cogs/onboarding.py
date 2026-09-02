@@ -9,6 +9,7 @@ import discord
 from discord.ext import commands
 
 import database
+from discord_names import find_game_role, find_text_channel, member_role_keys
 from config import (
     CHANNEL_MOD,
     CHANNEL_RULES,
@@ -29,10 +30,7 @@ class OnboardingCog(commands.Cog):
         self._synced = False
 
     def _find_channel(self, guild: discord.Guild, name: str) -> discord.TextChannel | None:
-        for channel in guild.text_channels:
-            if channel.name.lower() == name.lower():
-                return channel
-        return None
+        return find_text_channel(guild, name)
 
     def _rules_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
         for name in (CHANNEL_RULES, *RULES_CHANNEL_CANDIDATES):
@@ -106,10 +104,10 @@ class OnboardingCog(commands.Cog):
 
     async def _grant_npc(self, member: discord.Member) -> None:
         guild = member.guild
-        existing = {r.name.upper() for r in member.roles}
-        if {ROLE_PLAYER.upper(), ROLE_WINNER.upper(), ROLE_NPC.upper()} & existing:
+        existing = member_role_keys(member)
+        if {"PLAYER", "WINNER", "NPC"} & existing:
             return
-        role = discord.utils.get(guild.roles, name=ROLE_NPC)
+        role = find_game_role(guild, "NPC")
         if not role:
             await self._mod_log(
                 guild, "NPC role missing",

@@ -13,6 +13,7 @@ from discord.ext import commands, tasks
 import database
 from config import (
     CHANNEL_MOD,
+    EXTRA_VOTE_PACK_SIZE,
     MANAGE_SUBSCRIPTION_CHANNEL_CANDIDATES,
     ROLE_NPC,
     ROLE_PLAYER,
@@ -22,6 +23,7 @@ from config import (
     STRIPE_WEBHOOK_PORT,
     StripeSettings,
 )
+from discord_names import find_game_role, find_text_channel, logical_role_key, member_role_keys
 from services.email_client import send_email, subscription_email
 from services.stripe_client import (
     StripeClientError,
@@ -45,10 +47,7 @@ ACTIVE_STATUSES = {"active", "trialing", "active_until_period_end"}
 
 
 def _find_text_channel(guild: discord.Guild, name: str) -> discord.TextChannel | None:
-    for ch in guild.text_channels:
-        if ch.name.lower() == name.lower():
-            return ch
-    return None
+    return find_text_channel(guild, name)
 
 
 def find_subscribe_channel(guild: discord.Guild) -> discord.TextChannel | None:
@@ -84,9 +83,10 @@ def player_subscribe_embed() -> discord.Embed:
         title="Subscribe to PLAYER",
         description=(
             "Become a **PLAYER** subscriber:\n"
-            "• **5 votes** per category each week (vs 1 as NPC)\n"
+            "• **5 votes** per category each week (vs 1 as NPC) — you may put multiple votes on the same ticker\n"
             "• Access to **live leaderboard** channels\n"
-            "• Ticker pick channels during pre-vote\n\n"
+            "• Ticker pick channels during pre-vote\n"
+            "• Option to buy extra votes in the extra-votes channel\n\n"
             "Click **Subscribe**, then **Pay on Stripe** to complete checkout."
         ),
         color=discord.Color.green(),
@@ -377,17 +377,17 @@ class BillingCog(commands.Cog):
         try:
             if database.is_paid_member(member.id):
                 await self._set_player_role(member.id, True, reason="paid_member_join")
-            else:
-                await self._ensure_npc_role(member)
+            # New unpaid members stay roleless so only #RULES is visible
+            # until they react on the rules gate (NPC).
         except Exception as exc:  # noqa: BLE001
             print(f"[billing] on_member_join reconcile failed for {member.id}: {exc!r}", flush=True)
 
     async def _ensure_npc_role(self, member: discord.Member) -> bool:
         """Give a member the NPC role unless they already hold PLAYER/WINNER/NPC."""
-        existing = {r.name.upper() for r in member.roles}
-        if {ROLE_PLAYER.upper(), ROLE_WINNER.upper(), ROLE_NPC.upper()} & existing:
+        existing = member_role_keys(member)
+        if {"PLAYER", "WINNER", "NPC"} & existing:
             return False
-        role = discord.utils.get(member.guild.roles, name=ROLE_NPC)
+        role = find_game_role(member.guild, "NPC")
         if not role:
             await self._mod_log(
                 member.guild, "NPC role missing",
@@ -443,27 +443,23 @@ class BillingCog(commands.Cog):
         for member in guild.members:
             if member.bot:
                 continue
-            existing = {r.name.upper() for r in member.roles}
+            existing = member_role_keys(member)
             # Heal legacy conflicts: a PLAYER/WINNER must not also carry NPC,
             # otherwise channel overwrites collide (NPC 'view' allow leaks the
             # subscribe funnel past the PLAYER deny).
-            if ROLE_NPC.upper() in existing and (
-                {ROLE_PLAYER.upper(), ROLE_WINNER.upper()} & existing
-            ):
-                keep = ROLE_PLAYER if ROLE_PLAYER.upper() in existing else ROLE_WINNER
+            if "NPC" in existing and ({"PLAYER", "WINNER"} & existing):
+                keep = ROLE_PLAYER if "PLAYER" in existing else ROLE_WINNER
                 await self._strip_conflicting_roles(member, keep=keep, reason="npc_reconcile")
-            if {ROLE_PLAYER.upper(), ROLE_WINNER.upper(), ROLE_NPC.upper()} & existing:
+            if {"PLAYER", "WINNER", "NPC"} & existing:
                 continue
-            # Don't override paid members; promote them to PLAYER instead.
+            # Paid members without PLAYER still get promoted. Roleless unpaid
+            # members stay hidden (only RULES) until they pass the rules gate.
             try:
                 if database.is_paid_member(member.id):
                     if await self._set_player_role(member.id, True, reason="npc_reconcile_paid"):
                         assigned += 1
-                    continue
             except Exception:
                 pass
-            if await self._ensure_npc_role(member):
-                assigned += 1
         if assigned:
             print(f"[billing] NPC reconcile assigned {assigned} role(s) in guild {guild.id}", flush=True)
         return assigned
@@ -519,11 +515,13 @@ class BillingCog(commands.Cog):
         otherwise rely on snapshot precedence to stay eligibility-correct. We
         keep the role state itself clean so permissions are never contradictory.
         """
-        keep_upper = keep.upper()
+        keep_key = logical_role_key(keep) or keep.upper()
         for role_name in (ROLE_NPC, ROLE_PLAYER, ROLE_WINNER):
-            if role_name.upper() == keep_upper:
+            if logical_role_key(role_name) == keep_key:
                 continue
-            role = discord.utils.get(member.roles, name=role_name)
+            role = find_game_role(member.guild, role_name)
+            if role and role not in member.roles:
+                role = None
             if not role:
                 continue
             try:
@@ -556,7 +554,7 @@ class BillingCog(commands.Cog):
             member = await self._resolve_member(guild, discord_id)
             if not member:
                 continue
-            role = discord.utils.get(guild.roles, name=ROLE_PLAYER)
+            role = find_game_role(guild, "PLAYER")
             if not role:
                 await self._mod_log(
                     guild, "PLAYER role missing",
@@ -787,6 +785,54 @@ class BillingCog(commands.Cog):
         )
         return discord_id, status
 
+    async def _grant_purchased_votes(
+        self, obj: dict[str, Any], event_id: str | None = None
+    ) -> tuple[int | None, str | None]:
+        """Apply a one-time extra-votes purchase. Never touches PLAYER / subscription."""
+        meta = obj.get("metadata") or {}
+        try:
+            discord_id = int(meta.get("discord_id") or obj.get("client_reference_id") or 0)
+        except (TypeError, ValueError):
+            discord_id = 0
+        if not discord_id:
+            database.log_event(None, "extra_votes_unresolved", {"event_id": event_id})
+            return None, None
+        if obj.get("payment_status") not in {None, "paid", "no_payment_required"} and obj.get("status") != "complete":
+            return discord_id, "unpaid"
+        try:
+            guild_id = int(meta.get("guild_id") or 0)
+        except (TypeError, ValueError):
+            guild_id = 0
+        if not guild_id and self.bot.guilds:
+            guild_id = self.bot.guilds[0].id
+        week_key = str(meta.get("week_key") or database.voting_week_key_for_guild(guild_id))
+        try:
+            pack = int(meta.get("pack_size") or EXTRA_VOTE_PACK_SIZE)
+        except (TypeError, ValueError):
+            pack = EXTRA_VOTE_PACK_SIZE
+        new_total = database.add_extra_vote_credits(
+            guild_id, discord_id, week_key, pack, source="stripe_purchase"
+        )
+        database.log_event(
+            guild_id,
+            "extra_votes_purchased",
+            {
+                "discord_id": discord_id,
+                "week_key": week_key,
+                "pack_size": pack,
+                "new_total": new_total,
+                "event_id": event_id,
+            },
+        )
+        await self._mod_log(
+            self.bot.guilds[0] if self.bot.guilds else None,
+            "Extra votes purchased",
+            f"User: <@{discord_id}>\nWeek: `{week_key}`\nAdded: **+{pack}** / category\n"
+            f"Now: **{new_total}** extra votes this week.",
+            discord.Color.green(),
+        )
+        return discord_id, "extra_votes"
+
     async def process_stripe_webhook_payload(
         self,
         payload: bytes,
@@ -818,7 +864,11 @@ class BillingCog(commands.Cog):
                 print(f"[billing] Could not record event {event_id}: {exc!r}", flush=True)
 
         try:
-            discord_id, status = await self._sync_subscription(obj, event_type, event_id)
+            meta = obj.get("metadata") or {}
+            if event_type == "checkout.session.completed" and str(meta.get("kind") or "") == "extra_votes":
+                discord_id, status = await self._grant_purchased_votes(obj, event_id)
+            else:
+                discord_id, status = await self._sync_subscription(obj, event_type, event_id)
         except Exception as exc:  # noqa: BLE001
             database.mark_stripe_event_processed(event_id, error=repr(exc))
             database.log_event(None, "stripe_webhook_error", {"type": event_type, "event_id": event_id, "error": repr(exc)})

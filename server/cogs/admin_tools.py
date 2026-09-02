@@ -12,6 +12,7 @@ import discord
 from discord.ext import commands
 
 import database
+from discord_names import find_game_role, find_text_channel
 from config import (
     CHANNEL_BLUE_LIVE,
     CHANNEL_BLUE_TICKER,
@@ -24,11 +25,19 @@ from config import (
     CHANNEL_MID_TICKER,
     CHANNEL_MID_VOTE,
     CHANNEL_MOD,
+    CHANNEL_EXTRA_VOTES,
     CHANNEL_PICK_RESULTS,
+    CHANNEL_QA,
+    CHANNEL_RULES,
     CHANNEL_SMALL_LIVE,
     CHANNEL_SMALL_TICKER,
     CHANNEL_SMALL_VOTE,
     CHANNEL_WINNERS,
+    EXTRA_VOTES_CHANNEL_CANDIDATES,
+    PICK_RESULTS_CHANNEL_CANDIDATES,
+    QA_CHANNEL_CANDIDATES,
+    RULES_CHANNEL_CANDIDATES,
+    SUBSCRIBE_CHANNEL_CANDIDATES,
     ROLE_ADMIN,
     ROLE_NPC,
     ROLE_PLAYER,
@@ -48,10 +57,7 @@ class AdminToolsCog(commands.Cog):
         self.bot = bot
 
     def _find_channel(self, guild: discord.Guild, name: str) -> discord.TextChannel | None:
-        for channel in guild.text_channels:
-            if channel.name.lower() == name.lower():
-                return channel
-        return None
+        return find_text_channel(guild, name)
 
     async def _ensure_role(
         self,
@@ -60,8 +66,13 @@ class AdminToolsCog(commands.Cog):
         *,
         permissions: discord.Permissions | None = None,
     ) -> tuple[discord.Role, bool]:
-        role = discord.utils.get(guild.roles, name=name)
+        role = find_game_role(guild, name) or discord.utils.get(guild.roles, name=name)
         if role:
+            if role.name != name:
+                try:
+                    await role.edit(name=name, reason="Stock bot infrastructure setup")
+                except discord.Forbidden:
+                    pass
             return role, False
         role = await guild.create_role(
             name=name,
@@ -75,10 +86,15 @@ class AdminToolsCog(commands.Cog):
         guild: discord.Guild,
         name: str,
         overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite],
+        *aliases: str,
+        rename: bool = True,
     ) -> tuple[discord.TextChannel, bool]:
-        channel = self._find_channel(guild, name)
+        channel = find_text_channel(guild, name, *aliases)
         if channel:
-            await channel.edit(overwrites=overwrites, reason="Stock bot infrastructure setup")
+            edits: dict = {"overwrites": overwrites}
+            if rename and channel.name != name:
+                edits["name"] = name
+            await channel.edit(**edits, reason="Stock bot infrastructure setup")
             return channel, False
         channel = await guild.create_text_channel(
             name=name,
@@ -119,6 +135,10 @@ class AdminToolsCog(commands.Cog):
             embed_links=True,
             use_external_emojis=True,
         )
+        player_perms.pin_messages = False
+        player_perms.bypass_slowmode = False
+        admin_perms.pin_messages = False
+        admin_perms.bypass_slowmode = False
         winner_perms = player_perms
 
         created_roles: List[str] = []
@@ -137,71 +157,87 @@ class AdminToolsCog(commands.Cog):
 
         everyone = guild.default_role
         bot_member = guild.me
+        no_pin = {"pin_messages": False, "bypass_slowmode": False}
 
         def public_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
             return {
-                everyone: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-                npc_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-                player_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-                winner_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-                admin_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+                everyone: discord.PermissionOverwrite(view_channel=False, send_messages=False, **no_pin),
+                npc_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True, **no_pin),
+                player_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True, **no_pin),
+                winner_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True, **no_pin),
+                admin_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, **no_pin),
                 bot_member: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, read_message_history=True),
             }
 
         def subscribe_funnel_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
             """Subscribe / become-PLAYER channel: NPCs only (hide from PLAYER and ADMIN)."""
             return {
-                everyone: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-                npc_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-                player_role: discord.PermissionOverwrite(view_channel=False),
-                winner_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-                admin_role: discord.PermissionOverwrite(view_channel=False),
+                everyone: discord.PermissionOverwrite(view_channel=False, send_messages=False, **no_pin),
+                npc_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True, **no_pin),
+                player_role: discord.PermissionOverwrite(view_channel=False, **no_pin),
+                winner_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True, **no_pin),
+                admin_role: discord.PermissionOverwrite(view_channel=False, **no_pin),
                 bot_member: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, read_message_history=True),
             }
 
         def subscriber_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
             return {
-                everyone: discord.PermissionOverwrite(view_channel=False),
-                npc_role: discord.PermissionOverwrite(view_channel=False),
-                player_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-                winner_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-                admin_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+                everyone: discord.PermissionOverwrite(view_channel=False, **no_pin),
+                npc_role: discord.PermissionOverwrite(view_channel=False, **no_pin),
+                player_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True, **no_pin),
+                winner_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True, **no_pin),
+                admin_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, **no_pin),
                 bot_member: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, read_message_history=True),
             }
 
         def mod_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
             return {
-                everyone: discord.PermissionOverwrite(view_channel=False),
-                npc_role: discord.PermissionOverwrite(view_channel=False),
-                player_role: discord.PermissionOverwrite(view_channel=False),
-                winner_role: discord.PermissionOverwrite(view_channel=False),
-                admin_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+                everyone: discord.PermissionOverwrite(view_channel=False, **no_pin),
+                npc_role: discord.PermissionOverwrite(view_channel=False, **no_pin),
+                player_role: discord.PermissionOverwrite(view_channel=False, **no_pin),
+                winner_role: discord.PermissionOverwrite(view_channel=False, **no_pin),
+                admin_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, **no_pin),
+                bot_member: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, read_message_history=True),
+            }
+
+        def rules_overwrites() -> dict[discord.Role | discord.Member, discord.PermissionOverwrite]:
+            return {
+                everyone: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True, **no_pin),
+                npc_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True, **no_pin),
+                player_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True, **no_pin),
+                winner_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True, **no_pin),
+                admin_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, **no_pin),
                 bot_member: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True, read_message_history=True),
             }
 
         created_channels: List[str] = []
         updated_channels: List[str] = []
-        channel_specs = {
-            CHANNEL_SMALL_TICKER: subscriber_overwrites(),
-            CHANNEL_MID_TICKER: subscriber_overwrites(),
-            CHANNEL_BLUE_TICKER: subscriber_overwrites(),
-            CHANNEL_PICK_RESULTS: subscriber_overwrites(),
-            CHANNEL_SMALL_VOTE: public_overwrites(),
-            CHANNEL_MID_VOTE: public_overwrites(),
-            CHANNEL_BLUE_VOTE: public_overwrites(),
-            CHANNEL_SMALL_LIVE: subscriber_overwrites(),
-            CHANNEL_MID_LIVE: subscriber_overwrites(),
-            CHANNEL_BLUE_LIVE: subscriber_overwrites(),
-            CHANNEL_MOD: mod_overwrites(),
-            CHANNEL_ADMIN_ACTIONS: mod_overwrites(),
-            CHANNEL_SUBSCRIBE: subscribe_funnel_overwrites(),
-            CHANNEL_MANAGE_SUBSCRIPTION: public_overwrites(),
-            CHANNEL_FINAL_LEADERBOARD: public_overwrites(),
-            CHANNEL_WINNERS: public_overwrites(),
-        }
+        channel_specs: list[tuple[str, dict, tuple[str, ...], bool]] = [
+            (CHANNEL_SMALL_TICKER, subscriber_overwrites(), (), True),
+            (CHANNEL_MID_TICKER, subscriber_overwrites(), (), True),
+            (CHANNEL_BLUE_TICKER, subscriber_overwrites(), (), True),
+            (CHANNEL_PICK_RESULTS, subscriber_overwrites(), PICK_RESULTS_CHANNEL_CANDIDATES, True),
+            (CHANNEL_SMALL_VOTE, public_overwrites(), (), True),
+            (CHANNEL_MID_VOTE, public_overwrites(), (), True),
+            (CHANNEL_BLUE_VOTE, public_overwrites(), (), True),
+            (CHANNEL_SMALL_LIVE, subscriber_overwrites(), (), True),
+            (CHANNEL_MID_LIVE, subscriber_overwrites(), (), True),
+            (CHANNEL_BLUE_LIVE, subscriber_overwrites(), (), True),
+            (CHANNEL_MOD, mod_overwrites(), (), False),
+            (CHANNEL_ADMIN_ACTIONS, mod_overwrites(), (), False),
+            (CHANNEL_SUBSCRIBE, subscribe_funnel_overwrites(), SUBSCRIBE_CHANNEL_CANDIDATES, False),
+            (CHANNEL_MANAGE_SUBSCRIPTION, public_overwrites(), (), False),
+            (CHANNEL_FINAL_LEADERBOARD, public_overwrites(), (), False),
+            (CHANNEL_WINNERS, public_overwrites(), (), False),
+            (CHANNEL_QA, public_overwrites(), QA_CHANNEL_CANDIDATES, False),
+            (CHANNEL_EXTRA_VOTES, subscriber_overwrites(), EXTRA_VOTES_CHANNEL_CANDIDATES, False),
+            (CHANNEL_RULES, rules_overwrites(), RULES_CHANNEL_CANDIDATES, False),
+        ]
 
-        for name, overwrites in channel_specs.items():
-            _, was_created = await self._ensure_text_channel(guild, name, overwrites)
+        for name, overwrites, aliases, rename in channel_specs:
+            _, was_created = await self._ensure_text_channel(
+                guild, name, overwrites, *aliases, rename=rename
+            )
             (created_channels if was_created else updated_channels).append(name)
 
         database.ensure_cycle(guild.id)
