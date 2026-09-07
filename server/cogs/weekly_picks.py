@@ -40,6 +40,7 @@ from services.finnhub_client import FinnhubQuote, format_quote, quote_and_names_
 # import OpenPickerView to re-open ticker channels without touching submission_ui.py
 from cogs.submission_ui import OpenPickerView
 from discord_names import find_text_channel, member_role_keys
+import game_copy
 
 UTC = timezone.utc
 _vote_locks: WeakValueDictionary[tuple[int, int], asyncio.Lock] = WeakValueDictionary()
@@ -452,16 +453,12 @@ def _leaderboard_line(
     rank: int,
     ticker: str,
     votes: int,
-    quotes: dict[str, FinnhubQuote],
-    names: dict[str, str],
+    quotes: dict[str, FinnhubQuote] | None = None,
+    names: dict[str, str] | None = None,
     *,
     medal: str | None = None,
 ) -> str:
-    nm = _truncate(names.get(ticker, "") or "", 34) or "—"
-    q = format_quote(ticker, quotes.get(ticker))
-    head = f"{medal} **{rank}.** **${ticker}**" if medal else f"**{rank}.** **${ticker}**"
-    body = f"{nm}\n    {q} · **{votes}** votes"
-    return f"{head}\n{body}"
+    return game_copy.live_leaderboard_line(rank, ticker, votes, top3=rank <= 3)
 
 
 def _leaderboard_embed(
@@ -471,25 +468,21 @@ def _leaderboard_embed(
     names: dict[str, str] | None = None,
 ) -> discord.Embed:
     pairs = pairs if pairs is not None else _sorted_leaderboard(cat)
-    quotes = quotes or {}
-    names = names or {}
-
-    title = f"🏆 LIVE LEADERBOARD — {_category_title(cat)} 🏆"
+    title = _category_title(cat).upper()
     if not pairs:
         desc = "No votes yet."
     else:
-        lines: List[str] = []
-        medals = ["🥇", "🥈", "🥉"]
-        for i, (t, c) in enumerate(pairs[:3], start=1):
-            lines.append(
-                _leaderboard_line(i, t, c, quotes, names, medal=medals[i - 1])
-            )
-            lines.append("**━━━━━━━━━━━━━━━━**")
-        for j, (t, c) in enumerate(pairs[3:], start=4):
-            lines.append(_leaderboard_line(j, t, c, quotes, names))
-            if j < len(pairs):
-                lines.append("────────────────")
-        desc = "\n".join(lines)
+        top = []
+        rest = []
+        for i, (t, c) in enumerate(pairs, start=1):
+            line = game_copy.live_leaderboard_line(i, t, c, top3=i <= 3)
+            if i <= 3:
+                top.append(line)
+            else:
+                rest.append(line)
+        desc = "\n".join(top)
+        if rest:
+            desc += "\n\n" + "\n".join(rest)
 
     emb = discord.Embed(
         title=title,
@@ -579,9 +572,7 @@ async def _post_or_update_leaderboard(guild: discord.Guild, cat: int) -> None:
         return
     week_key = database.voting_week_key_for_guild(guild.id)
     pairs = database.vote_counts(guild.id, week_key, ["small", "mid", "blue"][cat])
-    tickers = [ticker for ticker, _ in pairs]
-    quotes, names = await asyncio.to_thread(quote_and_names_for_symbols, tickers)
-    emb = _leaderboard_embed(cat, pairs, quotes, names)
+    emb = _leaderboard_embed(cat, pairs)
     # edit existing if we have id
     msg_id = _live_msg_ids.get(cat)
     state_key = _message_state_key("live_leaderboard", cat)
@@ -635,12 +626,10 @@ async def _post_or_update_leaderboard(guild: discord.Guild, cat: int) -> None:
 
 # ===================== Pick-Results helpers (local copy) =====================
 
-def _fresh_pick_results_embed() -> discord.Embed:
+def _fresh_pick_results_embed(guild: discord.Guild | None = None) -> discord.Embed:
     emb = discord.Embed(
-        title="LIVE CHOSEN TICKERS",
-        description=(
-            f"Small / Mid / Blue weekly lists. Each category closes at {TICKER_LIMIT_PER_CATEGORY} tickers."
-        ),
+        title="LIVE CHOSEN TICKERS — OPEN",
+        description=game_copy.live_chosen_tickers_description(guild),
         color=discord.Color.gold()
     )
     emb.add_field(name=f"{CATEGORY_TITLES['small']} (0/{TICKER_LIMIT_PER_CATEGORY})", value="—", inline=False)
@@ -805,7 +794,11 @@ class WeeklyVotingView(discord.ui.View):
                 _log_vote("vote_rejected", reason="limit_reached", db_count=db_count, limit=limit)
                 return (
                     False,
-                    "YOU HAVE REACHED THE LIMIT OF YOUR VOTES. NEXT VOTING OPENS MONDAY 9AM.",
+                    game_copy.vote_limit_message(
+                        save_cat,
+                        is_npc=role_at_vote == "NPC",
+                        guild=guild,
+                    ),
                     save_cat,
                     save_key,
                 )
@@ -923,37 +916,22 @@ class WeeklyVotingView(discord.ui.View):
         user_list = _ensure_user_slot(cat, member.id)
         mem_count = len(user_list)
 
+        if mem_count >= limit:
+            await interaction.followup.send(
+                game_copy.vote_limit_message(
+                    cat,
+                    is_npc=role_at_vote == "NPC",
+                    guild=guild,
+                ),
+                ephemeral=True,
+            )
+            return
+
         if ticker in user_list and not _can_stack_votes(member):
             await interaction.followup.send(
                 f"You already voted for ${ticker} in this category "
                 f"(your pick: ${ticker}).",
                 ephemeral=True,
-            )
-            return
-
-        if limit == 1 and mem_count >= 1:
-            picked = user_list[0] if user_list else ticker
-            reg_mention = _channel_mention_or_text(
-                guild,
-                list(SUBSCRIBE_CHANNEL_CANDIDATES),
-                "#subscribe",
-            )
-            await interaction.followup.send(
-                f"YOU ALREADY VOTED FOR ${picked} IN THIS CATEGORY. "
-                "YOU HAVE REACHED THE LIMIT OF YOUR VOTES. "
-                "NEXT VOTING OPENS MONDAY 9AM. "
-                f"IF YOU WANT TO GET MORE VOTES AND EXTRA PRESS HERE TO SUBSCRIBE: {reg_mention}",
-                ephemeral=True
-            )
-            return
-
-        if mem_count >= limit:
-            picks = ", ".join(f"${t}" for t in user_list) or "—"
-            await interaction.followup.send(
-                f"YOU HAVE REACHED THE LIMIT OF YOUR VOTES ({mem_count}/{limit}). "
-                f"Your votes this category: {picks}. "
-                "NEXT VOTING OPENS MONDAY 9AM.",
-                ephemeral=True
             )
             return
 
@@ -976,22 +954,8 @@ class WeeklyVotingView(discord.ui.View):
         new_count = len(_ensure_user_slot(save_cat, member.id))
         on_ticker = _ensure_user_slot(save_cat, member.id).count(ticker)
 
-        if limit == 1:
-            reg_mention = _channel_mention_or_text(
-                guild,
-                list(SUBSCRIBE_CHANNEL_CANDIDATES),
-                "#subscribe",
-            )
-            await interaction.followup.send(
-                f"{_vote_confirmation_message(ticker, save_cat, new_count, limit, on_ticker)}\n"
-                f"Join {reg_mention} to get 5 weekly votes (you may stack them on the same ticker) "
-                "and see live results in real time.",
-                ephemeral=True,
-            )
-            return
-
         await interaction.followup.send(
-            _vote_confirmation_message(ticker, save_cat, new_count, limit, on_ticker),
+            _vote_confirmation_message(ticker, save_cat, new_count, limit, on_ticker, guild=guild),
             ephemeral=True,
         )
 
@@ -1072,24 +1036,19 @@ async def _purge_channel_messages(
     return deleted_total
 
 
-def _weekly_closed_banner() -> discord.Embed:
+def _weekly_closed_banner(guild: discord.Guild | None = None) -> discord.Embed:
     emb = discord.Embed(
         title="VOTING CLOSED",
-        description="Voting channels are closed and will reopen on Monday at 9:00 AM ET.",
+        description=game_copy.voting_closed_description(guild),
         color=discord.Color.dark_grey()
     )
     return emb
 
 
-def _open_picker_embed() -> discord.Embed:
+def _open_picker_embed(cat: int = 0, guild: discord.Guild | None = None) -> discord.Embed:
     return discord.Embed(
-        title="CHOOSE YOUR TICKER",
-        description=(
-            "Click **Open Picker** and type the **full ticker symbol** "
-            "(with or without `$`).\n\n"
-            "The ticker must be a real **NASDAQ** or **NYSE** stock that fits this channel’s "
-            "market-cap category."
-        ),
+        title="PLAYER VOTE OPEN",
+        description=game_copy.ticker_channel_open_description(cat, guild),
         color=discord.Color.blurple()
     )
 
@@ -1102,12 +1061,9 @@ def _vote_confirmation_message(
     count: int,
     limit: int,
     on_ticker: int = 1,
+    guild: discord.Guild | None = None,
 ) -> str:
-    stacked = f" ({on_ticker} on ${ticker})" if on_ticker > 1 else ""
-    return (
-        f"YOU HAVE PICKED ${ticker} in **{_category_title(cat)}**{stacked}\n"
-        f"YOU HAVE {count}/{limit} VOTES"
-    )
+    return game_copy.vote_picked_line(ticker, cat, count, limit, guild=guild)
 
 
 def _banner_description_with_timer(
@@ -1115,34 +1071,7 @@ def _banner_description_with_timer(
     end_utc: Optional[datetime],
     guild: discord.Guild | None = None,
 ) -> str:
-    live_ch = _category_idx_to_live_name(cat)
-    live_mention = (
-        _channel_mention_or_text(guild, [live_ch], f"#{live_ch}")
-        if guild
-        else f"#{live_ch}"
-    )
-    base = (
-        f"This week’s **{_category_title(cat)}** game is in the **vote stage**.\n\n"
-        "**What to do:** press a **button below** to vote for that stock. "
-        "Each button shows the ticker and its current price.\n\n"
-        f"**Live leaderboard:** {live_mention}\n"
-        "• **NPC** — 1 vote in this category\n"
-        "• **PLAYER / WINNER** — up to 5 votes (you may put multiple votes on the same ticker)\n\n"
-        "**Voting closes:** Friday at **4:00 PM ET** (market close)."
-    )
-    if end_utc is None:
-        return base
-    unix = int(end_utc.timestamp())
-    if datetime.now(tz=UTC) >= end_utc:
-        return (
-            f"{base}\n\n**Early winner window is closed** (ended <t:{unix}:F>).\n"
-            "You can still vote, but new votes do not qualify for WINNER."
-        )
-    return (
-        f"{base}\n\n"
-        f"⏳ **Early winner window ends in:** <t:{unix}:R>\n"
-        f"(ends <t:{unix}:F>)"
-    )
+    return game_copy.voting_open_description(cat, end_utc, guild=guild)
 
 
 def _build_voting_open_embed(
@@ -1156,21 +1085,16 @@ def _build_voting_open_embed(
         description=_banner_description_with_timer(cat, end_utc, guild=guild),
         color=color,
     )
-    emb.set_author(name=_category_title(cat))
     return emb
 
 
 async def build_final_leaderboard_embeds(guild_id: int, week_key: str) -> list[discord.Embed]:
-    """End-of-week board: one embed (and Discord message) per cap category."""
+    """End-of-week board: header + one embed per cap category (ticker + votes only)."""
     counts = database.all_vote_counts(guild_id, week_key)
-    all_syms: list[str] = []
-    for cat in ("small", "mid", "blue"):
-        all_syms.extend(t for t, _ in counts[cat])
-    quotes, names = await asyncio.to_thread(quote_and_names_for_symbols, all_syms)
-
-    embeds: list[discord.Embed] = []
+    tops: dict[str, str] = {}
+    table_embeds: list[discord.Embed] = []
     for cat_idx, cat_key in enumerate(("small", "mid", "blue")):
-        title = CATEGORY_TITLES[cat_key]
+        title = CATEGORY_TITLES[cat_key].upper()
         color = (
             _ROSTER_COLORS[cat_idx]
             if cat_idx < len(_ROSTER_COLORS)
@@ -1178,9 +1102,10 @@ async def build_final_leaderboard_embeds(guild_id: int, week_key: str) -> list[d
         )
         rows = counts[cat_key]
         if not rows:
-            embeds.append(
+            tops[cat_key] = "—"
+            table_embeds.append(
                 discord.Embed(
-                    title=f"FINAL WEEKLY LEADERBOARD — {title}",
+                    title=title,
                     description="No votes this week.",
                     color=color,
                 )
@@ -1190,37 +1115,26 @@ async def build_final_leaderboard_embeds(guild_id: int, week_key: str) -> list[d
         ranked = database.rank_leaderboard_with_tiebreak(
             rows, week_key=week_key, category=cat_key
         )
+        tops[cat_key] = ranked[0][1] if ranked else "—"
         lines: list[str] = []
-        any_tie = False
-        for rank, ticker, total, tied in ranked:
-            if tied:
-                any_tie = True
-            nm = _truncate(names.get(ticker, "") or "", 30) or "—"
-            q = format_quote(ticker, quotes.get(ticker))
-            note = " · tie broken at random" if tied else ""
-            lines.append(f"**{rank}.** `${ticker}` · {nm}\n    {q} · **{total}**{note}")
-
-        desc = "\n\n".join(lines)
+        for rank, ticker, total, _tied in ranked:
+            lines.append(f"${ticker} - {total} votes")
+        desc = "\n".join(lines)
         if len(desc) > 4000:
-            desc = "\n\n".join(lines[:12]) + "\n\n… *list truncated*"
-        footer = ""
-        if any_tie:
-            footer = (
-                "\n\nEqual vote totals were ranked by a random tie-break "
-                f"(seeded for week `{week_key}` so the order is stable)."
-            )
+            desc = "\n".join(lines[:40]) + "\n… *list truncated*"
+        table_embeds.append(discord.Embed(title=title, description=desc, color=color))
 
-        embeds.append(
-            discord.Embed(
-                title=f"FINAL WEEKLY LEADERBOARD — {title}",
-                description=(
-                    "Results for this week — **symbol**, **company**, **price**, **votes**.\n\n"
-                    f"{desc}{footer}"
-                ),
-                color=color,
-            )
-        )
-    return embeds
+    header = discord.Embed(
+        title=f"TOP PICKS BY CATEGORY — ({game_copy.friday_et_label(datetime.now(tz=UTC))})",
+        description=(
+            f"SMALL CAP — ${tops.get('small') or '—'}\n"
+            f"MID CAP — ${tops.get('mid') or '—'}\n"
+            f"LARGE CAP — ${tops.get('blue') or '—'}\n"
+            "You can view the full tables with total vote counts below ⬇️"
+        ),
+        color=discord.Color.gold(),
+    )
+    return [header, *table_embeds]
 
 
 async def _get_or_cache_voting_open_message(guild: discord.Guild, cat: int) -> Optional[discord.Message]:
@@ -1541,7 +1455,7 @@ class WeeklyPicksCog(commands.Cog):
         summary_lines: List[str] = []
 
         # 1) WEEKLY PICKS: wipe bot messages + post "VOTING CLOSED"
-        closed = _weekly_closed_banner()
+        closed = _weekly_closed_banner(guild)
         for name in REQUIRED_WEEKLY_CHANNELS:
             ch = _find_text_channel(guild, name)
             if not ch:
@@ -1582,21 +1496,21 @@ class WeeklyPicksCog(commands.Cog):
         summary_lines.append(
             "• #pick-results: reset to (0/20) for all categories")
 
-        # 4) TICKER CHANNELS: clear bot messages and post Open Picker embed+view
-        opener = _open_picker_embed()
-        for name in TICKER_CHANNELS:
+        # 4) TICKER CHANNELS: clear bot messages and post CHOOSE TICKER embed+view
+        for idx, name in enumerate(TICKER_CHANNELS):
             ch = _find_text_channel(guild, name)
             if not ch:
                 summary_lines.append(f"• Missing #{name}")
                 continue
             deleted = await _delete_bot_messages(ch, guild, limit=200)
             try:
+                opener = _open_picker_embed(idx, guild)
                 await ch.send(embed=opener, view=OpenPickerView(channel=ch, user_id=ctx.author.id))
                 summary_lines.append(
-                    f"• #{name}: cleared {deleted} and posted Open Picker")
+                    f"• #{name}: cleared {deleted} and posted CHOOSE TICKER")
             except Exception as e:
                 summary_lines.append(
-                    f"• #{name}: failed to post Open Picker ({e})")
+                    f"• #{name}: failed to post CHOOSE TICKER ({e})")
 
         # Report summary back to #mod
         report = discord.Embed(

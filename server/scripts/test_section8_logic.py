@@ -28,7 +28,8 @@ def main() -> int:
         fails.append("Friday close must set voting_open=False")
     if "VOTING CLOSED" not in close_src or "_purge_channel_messages" not in close_src:
         fails.append("Friday close must purge weekly channels and post closed message")
-    if "Monday at 9 AM" not in close_src:
+    copy_src = (ROOT / "game_copy.py").read_text(encoding="utf-8")
+    if "Monday at 9 AM" not in copy_src and "Monday at 9 AM" not in close_src:
         fails.append("closing message must state next open time")
 
     if "build_final_leaderboard_embeds" not in close_src or "leaderboard.send" not in close_src:

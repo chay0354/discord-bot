@@ -39,7 +39,6 @@ from config import (
     ROLE_PLAYER,
     ROLE_WINNER,
     TICKER_LIMIT_PER_CATEGORY,
-    WINNER_BONUS_VOTES,
 )
 # --- Pull the primitives we already have in other cogs ---
 # Early-window state + voting UI + leaderboards + helpers
@@ -77,6 +76,7 @@ from cogs.submission_ui import (
     sync_pick_results_from_db,
     reset_picker_runtime_state,
 )
+import game_copy
 
 # --- TZ handling: try ZoneInfo; else robust manual ET with US DST rules ---
 try:
@@ -255,28 +255,11 @@ def _timer_lines(end_utc: datetime) -> str:
 
 
 def _winner_role_dm(valid_until_utc: datetime) -> str:
-    et = _format_et(valid_until_utc)
-    return (
-        "CONGRATULATIONS! 🎉 **YOU WON THE WINNER ROLE** 🎉\n\n"
-        f"Your **WINNER** role is valid for one week, starting now until **{et}**.\n\n"
-        "**The WINNER role gives you the same perks as a PLAYER subscription:**\n"
-        "• **5 votes** per week in each category (you may stack them on the same ticker)\n"
-        f"• **+{WINNER_BONUS_VOTES} extra vote** next week as a win bonus\n"
-        "• Streak badge that grows with consecutive wins (🏆 → 🔥 → 💎)\n"
-        "• Access to subscriber-only channels:\n"
-        "  • **CHOOSE YOUR TICKER** channels — pick stocks for next week's ballot\n"
-        "  • **LIVE LEADERBOARD** channels — live vote counts during the week\n"
-        "  • VIP chat for subscribers only\n\n"
-        "⚠ This role will be removed automatically when the week ends."
-    )
+    return game_copy.winner_role_dm(game_copy.friday_et_label(valid_until_utc))
 
 
 def _winner_role_removed_dm(player_mention: str) -> str:
-    return (
-        "**WINNER ROLE REMOVED**\n\n"
-        "If you would like to continue enjoying WINNER perks, you can participate in next week's "
-        f"competition or subscribe in {player_mention}."
-    )
+    return game_copy.winner_role_removed_dm(player_mention)
 
 
 def _player_channel_mention(guild: discord.Guild) -> str:
@@ -488,6 +471,39 @@ class SchedulerCog(commands.Cog):
             return
         try:
             await ch.send(embed=report.to_embed())
+        except Exception:
+            pass
+
+    async def _post_midweek_leaderboard_notice(self, guild: discord.Guild) -> None:
+        ch = _find_text_channel(guild, CHANNEL_FINAL_LEADERBOARD)
+        if not ch:
+            return
+        await self._clear_midweek_leaderboard_notice(guild, ch)
+        sent = await ch.send(
+            embed=discord.Embed(
+                title="VOTING STILL OPEN",
+                description=game_copy.midweek_leaderboard_description(guild),
+                color=discord.Color.blue(),
+            )
+        )
+        database.save_message_state(
+            guild.id,
+            "leaderboard_midweek",
+            channel_id=ch.id,
+            message_id=sent.id,
+            payload={"kind": "midweek_notice"},
+        )
+
+    async def _clear_midweek_leaderboard_notice(
+        self, guild: discord.Guild, ch: discord.TextChannel
+    ) -> None:
+        row = database.get_message_state(guild.id, "leaderboard_midweek")
+        mid = int(row["message_id"]) if row and row.get("message_id") else None
+        if not mid:
+            return
+        try:
+            msg = await ch.fetch_message(mid)
+            await msg.delete()
         except Exception:
             pass
 
@@ -717,7 +733,9 @@ class SchedulerCog(commands.Cog):
             except Exception:
                 pass
             try:
-                emb = _closed_banner_embed(guild, count=per_cat_counts[idx])
+                emb = _closed_banner_embed(
+                    guild, count=per_cat_counts[idx], cat_idx=idx
+                )
                 await tch.send(embed=emb)
                 ticker_closed += 1
             except Exception:
@@ -727,6 +745,12 @@ class SchedulerCog(commands.Cog):
             ticker_closed == ticker_found and ticker_found > 0,
             f"{ticker_closed}/{ticker_found or 3} channels",
         )
+
+        try:
+            await self._post_midweek_leaderboard_notice(guild)
+            rpt.ok("Leaderboard channel shows mid-week 'voting still open' notice")
+        except Exception as exc:
+            rpt.fail("Leaderboard channel shows mid-week 'voting still open' notice", repr(exc))
 
         database.log_event(
             guild.id,
@@ -777,7 +801,12 @@ class SchedulerCog(commands.Cog):
         await self._announce_mod(
             guild,
             "Early Winner Window Closed",
-            f"Early-vote eligibility ended at {_format_et(_now_utc())}. New votes still count for the weekly vote, but not winner eligibility.",
+            (
+                f"Early-vote eligibility ended at **{_format_et(_now_utc())}** "
+                "(Tuesday 9:00 AM New York time).\n"
+                "New votes still count on the leaderboard, but they are **not** tagged `is_early` "
+                "and cannot win WINNER."
+            ),
             discord.Color.orange(),
         )
 
@@ -808,18 +837,12 @@ class SchedulerCog(commands.Cog):
             voting_open=False,
             early_window_open=False,
         )
-        opener = discord.Embed(
-            title="YOU CHOOSE YOUR TICKER",
-            description=(
-                "Click **Open Picker** and type the **full ticker symbol** "
-                "(with or without `$`).\n\n"
-                "The ticker must be a real **NASDAQ** or **NYSE** stock that fits this channel’s "
-                "market-cap category."
-            ),
-            color=discord.Color.blurple(),
-        )
         result = {"total": 0, "found": 0, "cleared": 0, "reopened": 0}
-        for name in (CHANNEL_SMALL_TICKER, CHANNEL_MID_TICKER, CHANNEL_BLUE_TICKER):
+        for cat_key, name in (
+            ("small", CHANNEL_SMALL_TICKER),
+            ("mid", CHANNEL_MID_TICKER),
+            ("blue", CHANNEL_BLUE_TICKER),
+        ):
             result["total"] += 1
             ch = _find_text_channel(guild, name)
             if not ch:
@@ -831,6 +854,11 @@ class SchedulerCog(commands.Cog):
             except Exception:
                 pass
             try:
+                opener = discord.Embed(
+                    title="PLAYER VOTE OPEN",
+                    description=game_copy.ticker_channel_open_description(cat_key, guild),
+                    color=discord.Color.blurple(),
+                )
                 await ch.send(embed=opener, view=OpenPickerView(channel=ch, user_id=0))
                 result["reopened"] += 1
             except Exception:
@@ -899,10 +927,8 @@ class SchedulerCog(commands.Cog):
                 await _clear_pick_results_message(msg, emb)
             else:
                 emb = discord.Embed(
-                    title="PICK RESULTS",
-                    description=(
-                        f"Small / Mid / Blue weekly lists. Each category closes at {TICKER_LIMIT_PER_CATEGORY} tickers."
-                    ),
+                    title="LIVE CHOSEN TICKERS — OPEN",
+                    description=game_copy.live_chosen_tickers_description(guild),
                     color=discord.Color.gold(),
                 )
                 emb.add_field(name=f"{CATEGORY_TITLES['small']} (0/{TICKER_LIMIT_PER_CATEGORY})", value="—", inline=False)
@@ -1110,13 +1136,9 @@ class SchedulerCog(commands.Cog):
             return discord.Embed(
                 title=title,
                 description=(
-                    f"Winner(s):\n{mentions}\n\n"
+                    f"Winner(s) this week:\n{mentions}\n\n"
                     f"Role: **{ROLE_WINNER}** (one week)\n"
-                    f"Valid until: **{_format_et(valid_until_utc)}**\n\n"
-                    "**WINNER perks:** 5 votes per category (you may stack them on the same ticker), "
-                    "ticker-pick channels, live leaderboards, "
-                    f"plus **+{WINNER_BONUS_VOTES} extra vote** next week "
-                    "and a streak badge (🏆 / 🔥 / 💎) that grows with consecutive wins."
+                    f"Valid until: **{_format_et(valid_until_utc)}**"
                 ),
                 color=discord.Color.gold(),
             )
@@ -1124,6 +1146,44 @@ class SchedulerCog(commands.Cog):
             title=title,
             description="No winner met all eligibility conditions.",
             color=discord.Color.dark_grey(),
+        )
+
+    def _winner_card_embed(
+        self,
+        *,
+        user_id: int,
+        week_key: str,
+        valid_until_utc: datetime,
+        winning_tickers: dict | None = None,
+        guild_id: int | None = None,
+    ) -> discord.Embed:
+        badge = "🏆"
+        if guild_id:
+            try:
+                row = database.get_message_state(
+                    guild_id, database.winner_stats_state_key(user_id)
+                )
+                badge = database.winner_incentive_badge((row or {}).get("payload"))
+            except Exception:
+                badge = "🏆"
+        picks = winning_tickers or {}
+        pick_lines = []
+        for cat in ("small", "mid", "blue"):
+            tickers = picks.get(cat) or []
+            title = CATEGORY_TITLES.get(cat, cat)
+            pick_lines.append(
+                f"• {title}: {', '.join(f'${t}' for t in tickers) if tickers else '—'}"
+            )
+        return discord.Embed(
+            title=f"{badge} WINNER",
+            description=(
+                f"{badge} <@{user_id}>\n\n"
+                "Won by voting the top ticker in every category as NPC "
+                "inside the first 24 hours.\n\n"
+                + "\n".join(pick_lines)
+                + f"\n\n**WINNER role** valid until **{game_copy.friday_et_label(valid_until_utc)} at 4PM EST**."
+            ),
+            color=discord.Color.gold(),
         )
 
     async def _publish_last_game_winners(
@@ -1135,6 +1195,7 @@ class SchedulerCog(commands.Cog):
         valid_until_utc: datetime,
         force_new: bool = False,
         closed_at_utc: datetime | None = None,
+        winning_tickers: dict | None = None,
     ) -> None:
         """Post a winner announcement to the 1st-ranked channel.
 
@@ -1170,8 +1231,20 @@ class SchedulerCog(commands.Cog):
         )
 
         if force_new:
-            # Always log this game as a new post; do not edit any prior week message.
-            await winner_channel.send(embed=embed)
+            # One festive card per winner, then a week summary. Never edit older tables.
+            if winner_ids:
+                for user_id in winner_ids:
+                    await winner_channel.send(
+                        embed=self._winner_card_embed(
+                            user_id=user_id,
+                            week_key=week_key,
+                            valid_until_utc=valid_until_utc,
+                            winning_tickers=winning_tickers,
+                            guild_id=guild.id,
+                        )
+                    )
+            else:
+                await winner_channel.send(embed=embed)
             return
 
         state_key = self._winners_week_state_key(week_key)
@@ -1283,12 +1356,7 @@ class SchedulerCog(commands.Cog):
         )
         closed = discord.Embed(
             title="VOTING CLOSED",
-            description=(
-                "Voting has ended for this week. "
-                f"Final results are posted in {leaderboard_mention}.\n\n"
-                "Voting will resume **Monday at 9 AM EST**.\n"
-                "CHOOSE YOUR TICKER is now open for PLAYER and WINNER roles."
-            ),
+            description=game_copy.voting_closed_description(guild),
             color=discord.Color.dark_grey(),
         )
         weekly_names = (CHANNEL_SMALL_VOTE, CHANNEL_MID_VOTE, CHANNEL_BLUE_VOTE)
@@ -1322,10 +1390,11 @@ class SchedulerCog(commands.Cog):
             + ("" if weekly_found == len(weekly_names) else f" ({weekly_found} found)"),
         )
 
-        # 3) Post final leaderboard tables.
+        # 3) Post final leaderboard tables (keep prior weeks in history).
         leaderboard = _find_text_channel(guild, CHANNEL_FINAL_LEADERBOARD)
         if leaderboard:
             try:
+                await self._clear_midweek_leaderboard_notice(guild, leaderboard)
                 final_embeds = await build_final_leaderboard_embeds(guild.id, week_key)
                 posted = 0
                 for emb in final_embeds:
@@ -1421,6 +1490,7 @@ class SchedulerCog(commands.Cog):
                 valid_until_utc=expires_at_utc,
                 force_new=True,
                 closed_at_utc=now_utc,
+                winning_tickers=report.get("winning_tickers") or {},
             )
             rpt.check(
                 "Winners were announced successfully",
@@ -1531,18 +1601,14 @@ class SchedulerCog(commands.Cog):
                 )
 
         # 8) Close live-leaderboard channels: delete tables + post closing message.
-        live_close = discord.Embed(
-            title="CHANNEL CURRENTLY CLOSED",
-            description=(
-                "The channel will reopen next **Monday at 9 AM EST**.\n"
-                "Here you can track live voting results during the week."
-            ),
-            color=discord.Color.dark_grey(),
+        live_names = (
+            (CHANNEL_SMALL_LIVE, "small"),
+            (CHANNEL_MID_LIVE, "mid"),
+            (CHANNEL_BLUE_LIVE, "blue"),
         )
-        live_names = (CHANNEL_SMALL_LIVE, CHANNEL_MID_LIVE, CHANNEL_BLUE_LIVE)
         live_deleted = 0
         live_closed = 0
-        for name in live_names:
+        for name, cat_key in live_names:
             ch = _find_text_channel(guild, name)
             if not ch:
                 continue
@@ -1552,6 +1618,11 @@ class SchedulerCog(commands.Cog):
             except Exception:
                 pass
             try:
+                live_close = discord.Embed(
+                    title="CHANNEL CURRENTLY CLOSED",
+                    description=game_copy.live_channel_closed_description(cat_key),
+                    color=discord.Color.dark_grey(),
+                )
                 await ch.send(embed=live_close)
                 live_closed += 1
             except Exception:
@@ -1599,7 +1670,7 @@ class SchedulerCog(commands.Cog):
 
         # 11) PLAYER roles added during the week (best-effort stat).
         player_added = database.count_player_grants_since(week_start_iso)
-        rpt.info("PLAYER roles were added during the week", f"{player_added} user(s)")
+        rpt.ok(f"PLAYER roles were added to {player_added} users during the week")
 
         database.log_event(
             guild.id,

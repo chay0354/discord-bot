@@ -25,6 +25,7 @@ from config import (
     TICKER_LIMIT_PER_CATEGORY,
 )
 from discord_names import find_text_channel, member_role_keys, names_match, normalize_discord_name
+import game_copy
 from services.finnhub_client import (
     resolve_symbol as finnhub_resolve_symbol,
     pop_last_error as finnhub_pop_last_error,
@@ -176,10 +177,10 @@ async def _find_pick_results_message(pr_ch: discord.TextChannel) -> tuple[discor
     return None
 
 
-def _pick_results_embed_scaffold() -> discord.Embed:
+def _pick_results_embed_scaffold(guild=None) -> discord.Embed:
     emb = discord.Embed(
-        title="LIVE CHOSEN TICKERS",
-        description=f"Small / Mid / Blue weekly lists. Each category closes at {TICKER_LIMIT_PER_CATEGORY} tickers.",
+        title="LIVE CHOSEN TICKERS — OPEN",
+        description=game_copy.live_chosen_tickers_description(guild),
         color=discord.Color.gold(),
     )
     emb.add_field(name=f"{CATEGORY_TITLES['small']} (0/{TICKER_LIMIT_PER_CATEGORY})", value="—", inline=False)
@@ -192,17 +193,20 @@ def _pick_results_embed_from_tickers(
     stored: dict[str, list[str]],
     *,
     ballot_locked: bool = False,
+    guild=None,
 ) -> discord.Embed:
     """Build the live pick-results board from Supabase ticker_picks (source of truth)."""
-    desc = (
-        f"Small / Mid / Blue weekly lists. Each category closes at {TICKER_LIMIT_PER_CATEGORY} tickers."
-    )
+    desc = game_copy.live_chosen_tickers_description(guild)
     if ballot_locked:
         desc += (
             "\n\n**This week's ballot** (from pre-vote). "
             "Voting is open — vote in the WEEKLY PICKS channels."
         )
-    emb = discord.Embed(title="PICK RESULTS", description=desc, color=discord.Color.gold())
+    emb = discord.Embed(
+        title="LIVE CHOSEN TICKERS — OPEN",
+        description=desc,
+        color=discord.Color.gold(),
+    )
     for idx, category in enumerate(("small", "mid", "blue")):
         tickers = stored.get(category, [])
         emb.add_field(
@@ -233,7 +237,9 @@ async def _refresh_pick_results_embed_from_db(
         return emb
     stored = database.list_tickers(guild.id, week_key)
     ballot_locked = database.is_voting_open(guild.id)
-    new_emb = _pick_results_embed_from_tickers(stored, ballot_locked=ballot_locked)
+    new_emb = _pick_results_embed_from_tickers(
+        stored, ballot_locked=ballot_locked, guild=guild
+    )
     await msg.edit(embed=new_emb)
     return new_emb
 
@@ -406,20 +412,15 @@ async def _is_channel_closed(ch: discord.TextChannel) -> bool:
     return count >= TICKER_LIMIT_PER_CATEGORY
 
 
-def _closed_banner_embed(guild: discord.Guild, count: int = TICKER_LIMIT_PER_CATEGORY) -> discord.Embed:
-    pick_results_mention = f"#{CHANNEL_PICK_RESULTS}"
-    pr_ch = find_text_channel(guild, CHANNEL_PICK_RESULTS, *PICK_RESULTS_CHANNEL_CANDIDATES)
-    if pr_ch:
-        pick_results_mention = pr_ch.mention
-
+def _closed_banner_embed(
+    guild: discord.Guild,
+    count: int = TICKER_LIMIT_PER_CATEGORY,
+    cat_idx: int | None = None,
+) -> discord.Embed:
+    cat = cat_idx if cat_idx is not None else 0
     emb = discord.Embed(
-        title=f"Submissions Closed ({count}/{TICKER_LIMIT_PER_CATEGORY})",
-        description=(
-            f"This ticker channel reached **{TICKER_LIMIT_PER_CATEGORY} unique submissions** and is **closed for this week**.\n\n"
-            "• Try the other ticker channels.\n"
-            "• Next opening: **Friday 4:00 PM ET** (after market close).\n"
-            f"• See the current picks in {pick_results_mention}."
-        ),
+        title="CHANNEL CLOSED",
+        description=game_copy.ticker_channel_closed(cat, guild),
         color=discord.Color.red()
     )
     return emb
@@ -540,12 +541,12 @@ class ExampleTickerSelect(discord.ui.Select):
             pass
 
 
-class TickerEntryModal(discord.ui.Modal, title="Try Ticker"):
-    """Free-text ticker entry. We auto-complete to the best valid match for this cap category."""
+class TickerEntryModal(discord.ui.Modal, title="CHOOSE TICKER"):
+    """Exact-symbol ticker entry. No prefix autocomplete — type the full symbol."""
 
     query: discord.ui.TextInput = discord.ui.TextInput(
-        label="Type a ticker (with or without $)",
-        placeholder="e.g. NVDA, $AAPL, TSLA",
+        label="Type the FULL ticker (with or without $)",
+        placeholder="e.g. NVDA, $AAPL, F",
         min_length=1,
         max_length=10,
         required=True,
@@ -558,14 +559,14 @@ class TickerEntryModal(discord.ui.Modal, title="Try Ticker"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if self.parent_view.frozen:
             await interaction.response.send_message(
-                "You already submitted a ticker for this channel.",
+                game_copy.already_submitted_ticker(interaction.guild),
                 ephemeral=True,
             )
             return
         raw = str(self.query.value or "").strip()
         if not raw:
             await interaction.response.send_message(
-                "Please type a ticker symbol.", ephemeral=True
+                "Please type the full ticker symbol.", ephemeral=True
             )
             return
         await self.parent_view.submit_ticker(interaction, raw)
@@ -582,7 +583,7 @@ class StockPickerView(discord.ui.View):
         self.frozen: bool = False
 
         self.try_btn = discord.ui.Button(
-            label="Try Ticker",
+            label="CLICK HERE",
             style=discord.ButtonStyle.primary,
             row=0,
         )
@@ -592,7 +593,7 @@ class StockPickerView(discord.ui.View):
     async def on_try_ticker(self, interaction: discord.Interaction) -> None:
         if self.frozen:
             await interaction.response.send_message(
-                "You already submitted a ticker for this channel.",
+                game_copy.already_submitted_ticker(interaction.guild),
                 ephemeral=True,
             )
             return
@@ -614,7 +615,7 @@ class StockPickerView(discord.ui.View):
 
         if self.frozen:
             await interaction.followup.send(
-                "You already submitted a ticker for this channel.",
+                game_copy.already_submitted_ticker(interaction.guild),
                 ephemeral=True,
             )
             return
@@ -655,7 +656,7 @@ class StockPickerView(discord.ui.View):
 
         if already_picked:
             await interaction.followup.send(
-                "You already submitted a ticker for this channel.",
+                game_copy.already_submitted_ticker(interaction.guild),
                 ephemeral=True,
             )
             return
@@ -688,7 +689,10 @@ class StockPickerView(discord.ui.View):
         """
         q = query.upper().strip().lstrip("$")
         category = category_for_channel(self.channel.name)
-        if not q:
+        if not q or " " in q:
+            return "not_found", q, None
+        # Exact symbol only — never prefix-match "A" onto AAPL / AMD / etc.
+        if not q.isalnum() and not any(sep in q for sep in (".", "-")):
             return "not_found", q, None
 
         finnhub_pop_last_error()  # clear any stale error before this lookup
@@ -745,8 +749,8 @@ class StockPickerView(discord.ui.View):
         if status == "not_found":
             return (
                 f"**{sym}** isn’t a recognized stock symbol. "
-                "Type the **full ticker** exactly as it trades (e.g. `NVDA`, `AAPL`, `F`), "
-                "then click **Open Picker** again."
+                "Type the **full ticker** exactly as it trades (e.g. `NVDA`, `AAPL`, `F`). "
+                "One letter only works if that letter is a real ticker (like `F` or `T`)."
             )
         if status == "bad_exchange":
             exch = (row or {}).get("exchange") or "its exchange"
@@ -770,7 +774,7 @@ class StockPickerView(discord.ui.View):
             )
         return (
             "Could not validate that ticker for this category. "
-            "Click **Open Picker** again and enter another symbol."
+            f"Click **{game_copy.CHOOSE_TICKER_BUTTON}** again and enter the full symbol."
         )
 
     def _freeze_controls(self) -> None:
@@ -822,12 +826,12 @@ class StockPickerView(discord.ui.View):
                     return
                 if reason == "user_already_picked":
                     await status_msg.edit(
-                        content="You already submitted a ticker for this category."
+                        content=game_copy.already_submitted_ticker(interaction.guild)
                     )
                     return
                 if reason == "duplicate":
                     await status_msg.edit(
-                        content=f"**${ticker.upper()}** is already in this category's list. Pick a different ticker."
+                        content=game_copy.ticker_already_selected(interaction.guild)
                     )
                     return
                 if reason == "closed":
@@ -848,9 +852,9 @@ class StockPickerView(discord.ui.View):
                     except Exception:
                         pass
                     await status_msg.edit(
-                        content=(
-                            f"This category already has {TICKER_LIMIT_PER_CATEGORY} unique tickers. "
-                            "Please try a different channel."
+                        content=game_copy.ticker_channel_closed(
+                            _category_index_for_channel(self.channel),
+                            interaction.guild,
                         )
                     )
                     return
@@ -901,7 +905,11 @@ class StockPickerView(discord.ui.View):
             if count_now is not None and count_now >= TICKER_LIMIT_PER_CATEGORY:
                 try:
                     await self.channel.send(
-                        embed=_closed_banner_embed(interaction.guild, count=count_now)
+                        embed=_closed_banner_embed(
+                            interaction.guild,
+                            count=count_now,
+                            cat_idx=cat_idx,
+                        )
                     )
                 except Exception:
                     pass
@@ -956,7 +964,7 @@ class OpenPickerView(discord.ui.View):
         self.channel = channel
         self.user_id = user_id
 
-    @discord.ui.button(label="Open Picker", style=discord.ButtonStyle.primary, custom_id="pre_voting:open_picker")
+    @discord.ui.button(label="CHOOSE TICKER", style=discord.ButtonStyle.primary, custom_id="pre_voting:open_picker")
     async def open_picker(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel = interaction.channel
         member = interaction.user
@@ -976,8 +984,9 @@ class OpenPickerView(discord.ui.View):
 
         if await _is_channel_closed(channel):
             await interaction.response.send_message(
-                f"This category already has {TICKER_LIMIT_PER_CATEGORY} unique tickers "
-                "and is **closed for this week**.",
+                game_copy.ticker_channel_closed(
+                    _category_index_for_channel(channel), interaction.guild
+                ),
                 ephemeral=True,
             )
             return
@@ -990,10 +999,14 @@ class OpenPickerView(discord.ui.View):
         except Exception as e:  # noqa: BLE001
             print("[OpenPickerView] Exception:", repr(e))
             try:
+                msg = (
+                    "That button is no longer active. Press **CHOOSE TICKER** again "
+                    "and type the full ticker symbol."
+                )
                 if not interaction.response.is_done():
-                    await interaction.response.send_message("Something went wrong. Try again.", ephemeral=True)
+                    await interaction.response.send_message(msg, ephemeral=True)
                 else:
-                    await interaction.followup.send("Something went wrong. Try again.", ephemeral=True)
+                    await interaction.followup.send(msg, ephemeral=True)
             except Exception:
                 pass
 
@@ -1004,7 +1017,7 @@ class OpenPickerViewMulti(discord.ui.View):
         self.channel = channel
         self.user_id = user_id
 
-    @discord.ui.button(label="Open Picker", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="CHOOSE TICKER", style=discord.ButtonStyle.primary)
     async def open_picker(self, interaction: discord.Interaction, button: discord.ui.Button):
         key = (self.channel.id, interaction.user.id)
         try:
@@ -1133,14 +1146,10 @@ class SubmissionUICog(commands.Cog):
             await ctx.send(embed=_closed_banner_embed(ctx.guild))
             return
 
+        cat_idx = _category_index_for_channel(ctx.channel)
         embed = discord.Embed(
-            title="CHOOSE YOUR TICKER",
-            description=(
-                "Click **Open Picker** and type the **full ticker symbol** "
-                "(with or without `$`).\n\n"
-                "The ticker must be a real **NASDAQ** or **NYSE** stock that fits this channel’s "
-                "market-cap category."
-            ),
+            title="PLAYER VOTE OPEN",
+            description=game_copy.ticker_channel_open_description(cat_idx, ctx.guild),
             color=discord.Color.blurple()
         )
         await ctx.send(embed=embed, view=OpenPickerView(channel=ctx.channel, user_id=ctx.author.id))
@@ -1188,7 +1197,9 @@ class SubmissionUICog(commands.Cog):
             else {"small": [], "mid": [], "blue": []}
         )
         ballot_locked = bool(ctx.guild and database.is_voting_open(ctx.guild.id))
-        new = _pick_results_embed_from_tickers(stored, ballot_locked=ballot_locked)
+        new = _pick_results_embed_from_tickers(
+            stored, ballot_locked=ballot_locked, guild=ctx.guild
+        )
         await msg.edit(embed=new)
         await ctx.send("Refreshed pick-results from the Supabase ticker selections. Broadcasting closed banners where needed…")
 
@@ -1207,7 +1218,7 @@ class SubmissionUICog(commands.Cog):
                 cnt = len(_parse_field_lines(fld.value if fld else None))
                 if cnt >= TICKER_LIMIT_PER_CATEGORY:
                     try:
-                        await ch.send(embed=_closed_banner_embed(guild, count=cnt))
+                        await ch.send(embed=_closed_banner_embed(guild, count=cnt, cat_idx=idx))
                     except Exception:
                         pass
 

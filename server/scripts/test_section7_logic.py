@@ -33,7 +33,7 @@ def main() -> int:
     desc = emb.description or ""
     if "user_id" in desc.lower() or "@" in desc:
         fails.append("leaderboard embed may expose user info")
-    if "$AMC" not in desc or "votes" not in desc:
+    if "$AMC" not in desc or "VOTES" not in desc.upper():
         fails.append("leaderboard missing ticker/vote display")
 
     src_post = inspect.getsource(

@@ -872,6 +872,7 @@ python server/scripts/<script_name>.py
 | [`RESTART_AND_STATE.md`](RESTART_AND_STATE.md) | Persistence, recovery |
 | [`../../README.md`](../../README.md) | Quick start |
 | [`../../.env.example`](../../.env.example) | Environment template |
+| [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) | Open-source libraries + third-party costs |
 
 ---
 
