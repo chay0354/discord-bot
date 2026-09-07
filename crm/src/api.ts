@@ -1,5 +1,9 @@
 const apiBaseUrl = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
-const adminKey = (import.meta.env.VITE_ADMIN_API_KEY || "").trim();
+// Keep the key in memory only; VITE_* values are public in the built bundle.
+let adminKey = "";
+export function setAdminKey(value: string) {
+  adminKey = value.trim();
+}
 const REQUEST_TIMEOUT_MS = 25_000;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -83,5 +87,6 @@ export const api = {
 };
 
 export function isApiConfigured(): boolean {
-  return Boolean(apiBaseUrl);
+  // An empty base uses the same-origin Railway host / local Vite proxy.
+  return true;
 }

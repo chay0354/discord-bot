@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, isApiConfigured, type GameHistoryEntry, type GameStatus } from "./api";
+import { api, isApiConfigured, setAdminKey, type GameHistoryEntry, type GameStatus } from "./api";
 
 const CATS = ["small", "mid", "blue"] as const;
 type Cat = (typeof CATS)[number];
@@ -102,6 +102,42 @@ function describeGameStage(cycle: Record<string, boolean | string> | undefined):
 }
 
 export default function App() {
+  const [key, setKey] = useState("");
+  const [authenticated, setAuthenticated] = useState(false);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  if (authenticated) return <Dashboard />;
+  return (
+    <main style={{ maxWidth: 440, margin: "15vh auto", padding: 24 }}>
+      <h1>MEME STOCK Admin</h1>
+      <p>Enter your admin access key to open the dashboard.</p>
+      <form onSubmit={async (event) => {
+        event.preventDefault();
+        setLoading(true);
+        setError("");
+        setAdminKey(key);
+        try {
+          await api.status();
+          setAuthenticated(true);
+          setKey("");
+        } catch (err) {
+          setAdminKey("");
+          setError(err instanceof Error ? err.message : "Sign-in failed");
+        } finally {
+          setLoading(false);
+        }
+      }}>
+        <label htmlFor="admin-key">Admin access key</label>
+        <input id="admin-key" type="password" autoComplete="off" required
+          value={key} onChange={(event) => setKey(event.target.value)} />
+        <button type="submit" disabled={loading}>{loading ? "Connecting…" : "Open dashboard"}</button>
+        {error && <p role="alert">{error}</p>}
+      </form>
+    </main>
+  );
+}
+
+function Dashboard() {
   const [status, setStatus] = useState<GameStatus | null>(null);
   const [tickers, setTickers] = useState<Record<string, string[]>>({});
   const [leaderboards, setLeaderboards] = useState<Record<string, LbRow[]>>({});

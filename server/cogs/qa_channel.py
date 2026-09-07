@@ -31,13 +31,16 @@ _DEFAULT_ITEMS: list[dict[str, str]] = [
 
 
 def _find_channel(guild: discord.Guild, names: tuple[str, ...]) -> discord.TextChannel | None:
-    ch = find_text_channel(guild, *names)
     me = guild.me
-    if ch is None or me is None:
-        return ch
-    perms = ch.permissions_for(me)
-    if perms.view_channel and perms.send_messages:
-        return ch
+    for name in names:
+        ch = find_text_channel(guild, name)
+        if ch is None:
+            continue
+        if me is None:
+            return ch
+        perms = ch.permissions_for(me)
+        if perms.view_channel and perms.send_messages and perms.read_message_history:
+            return ch
     return None
 
 
@@ -71,7 +74,7 @@ class QAView(discord.ui.View):
     def __init__(self, items: list[dict[str, str]] | None = None) -> None:
         super().__init__(timeout=None)
         source = items or _DEFAULT_ITEMS
-        for idx, item in enumerate(source[:5]):
+        for idx, item in enumerate(source[:10]):
             label = (item.get("q") or f"Q{idx + 1}")[:80]
             btn = discord.ui.Button(
                 label=label,
@@ -116,7 +119,6 @@ class QAChannelCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        self.bot.add_view(QAView(_DEFAULT_ITEMS))
         for guild in self.bot.guilds:
             try:
                 await self._ensure_channel(guild)
@@ -145,9 +147,8 @@ class QAChannelCog(commands.Cog):
                 view_channel=True, send_messages=True, manage_messages=True
             )
         if not ch:
-            # Do not create "qa" — Discord already has styled #ℚ＆𝗔 the bot cannot manage.
             parent = next(
-                (c.category for c in guild.text_channels if c.name.lower() == "admin-actions" and c.category),
+                (c for c in guild.categories if c.name.upper() == "STARTING"),
                 None,
             )
             ch = await guild.create_text_channel(
@@ -165,6 +166,7 @@ class QAChannelCog(commands.Cog):
         posted = False
         async for msg in ch.history(limit=15):
             if msg.author == guild.me and msg.embeds and (msg.embeds[0].title or "") == "Q&A":
+                await msg.edit(embed=qa_embed(items), view=QAView(items))
                 posted = True
                 break
         if not posted:

@@ -80,7 +80,9 @@ async def run_action(
         # silently skip winner computation.
         ended_week = database.open_voting_week_key(target.id)
         if ended_week:
-            await scheduler._friday_close_one_guild(target)
+            close_report = await scheduler._friday_close_one_guild(target)
+            if close_report.any_failed:
+                raise RuntimeError("Closing the previous game had failures. Review #mod before restarting it.")
         selection_week = await scheduler._restart_pre_voting_one_guild(
             target, actor_id=actor_id, manual=True
         )
@@ -105,6 +107,8 @@ async def run_action(
 
     if action in ("start_vote", "start_voting", "end_pre_start_voting"):
         updated, counts = await scheduler._monday_open_one_guild(target, manual=True)
+        if updated != 3:
+            raise RuntimeError(f"Voting opened in only {updated}/3 channels. Review #mod.")
         database.log_event(
             target.id,
             "start_vote",
@@ -123,7 +127,9 @@ async def run_action(
         return {"ok": True, "message": "Early window closed."}
 
     if action == "end_competition":
-        await scheduler._friday_close_one_guild(target)
+        close_report = await scheduler._friday_close_one_guild(target)
+        if close_report.any_failed:
+            raise RuntimeError("Game close had failed steps. Review #mod; do not restart until resolved.")
         database.log_event(target.id, "end_competition", {"actor_id": actor_id})
         return {"ok": True, "message": "Vote stage ended."}
 

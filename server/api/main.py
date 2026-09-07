@@ -37,7 +37,7 @@ allow_all = os.getenv("CRM_CORS_ALLOW_ALL", "").lower() in {"1", "true", "yes"}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"] if allow_all else allow_origins,
-    allow_origin_regex=None if allow_all else r"https://.*\.vercel\.app",
+    allow_origin_regex=None,
     allow_credentials=not allow_all,
     allow_methods=["*"],
     allow_headers=["*"],

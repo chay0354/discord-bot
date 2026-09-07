@@ -1269,6 +1269,8 @@ class SchedulerCog(commands.Cog):
             rpt.ok("WEEKLY PICKS voting closed successfully")
         except Exception as exc:
             rpt.fail("WEEKLY PICKS voting closed successfully", repr(exc))
+            await self._announce_report(guild, rpt)
+            raise RuntimeError("Could not close voting in the database; results were not published") from exc
 
         clear_vote_runtime_state()
 

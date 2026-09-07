@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
+from threading import RLock
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -20,6 +22,10 @@ from config import (
 
 class SupabaseError(RuntimeError):
     pass
+
+
+_credit_lock = RLock()
+_ET = ZoneInfo("America/New_York")
 
 
 def utc_now_iso() -> str:
@@ -200,7 +206,7 @@ def list_completed_games(guild_id: int, limit: int = 20) -> list[dict[str, Any]]
 
 
 def week_key_for(dt: datetime | None = None) -> str:
-    now = (dt or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    now = (dt or datetime.now(timezone.utc)).astimezone(_ET)
     iso = now.isocalendar()
     return f"{iso.year}-W{iso.week:02d}"
 
@@ -215,10 +221,8 @@ def ticker_selection_week_key_for(dt: datetime | None = None) -> str:
     Weekend ticker submissions belong to the upcoming Monday voting cycle.
     During the trading week they belong to the current cycle.
     """
-    now = (dt or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    # Approximate ET cutoff without importing the scheduler's DST helpers: after
-    # Friday 20:00 UTC is always after Friday 16:00 ET during US market hours.
-    if now.weekday() == 4 and now.hour >= 20:
+    now = (dt or datetime.now(timezone.utc)).astimezone(_ET)
+    if now.weekday() == 4 and now.hour >= 16:
         return next_week_key_for(now)
     if now.weekday() in {5, 6}:
         return next_week_key_for(now)
@@ -895,6 +899,20 @@ def add_extra_vote_credits(
     amount: int,
     *,
     source: str,
+    grant_id: str | None = None,
+) -> int:
+    # The Railway bot/API share one process. Serialize all read-modify-write
+    # grants, and persist the grant id in the SAME payload as the balance so a
+    # webhook retry after a failed audit/notification cannot credit twice.
+    with _credit_lock:
+        return _add_extra_vote_credits(
+            guild_id, user_id, week_key, amount, source=source, grant_id=grant_id
+        )
+
+
+def _add_extra_vote_credits(
+    guild_id: int, user_id: int, week_key: str, amount: int, *, source: str,
+    grant_id: str | None = None,
 ) -> int:
     """Add extra vote credits for ``week_key``. Returns the new total for that week."""
     key = extra_votes_state_key(user_id)
@@ -906,9 +924,24 @@ def add_extra_vote_credits(
         current = int(by_week.get(week_key) or 0)
     except (TypeError, ValueError):
         current = 0
+    applied = dict(payload.get("applied_grants") or {})
+    if grant_id and grant_id in applied:
+        return current
+    if grant_id and source == "winner_bonus" and any(
+        item.get("source") == "winner_bonus" and item.get("week_key") == week_key
+        for item in payload.get("history") or []
+    ):
+        # Adopt bonuses written before grant ids existed without granting twice.
+        applied[grant_id] = week_key
+        payload["applied_grants"] = applied
+        save_message_state(guild_id, key, channel_id=None, message_id=None, payload=payload)
+        return current
     new_total = max(0, current + int(amount))
     by_week[week_key] = new_total
     payload["credits_by_week"] = by_week
+    if grant_id:
+        applied[grant_id] = week_key
+        payload["applied_grants"] = applied
     payload["lifetime"] = int(payload.get("lifetime") or 0) + max(0, int(amount))
     history = list(payload.get("history") or [])
     history.append({"week_key": week_key, "amount": int(amount), "source": source, "at": utc_now_iso()})
@@ -933,9 +966,9 @@ def record_winner_incentive(
         try:
             last_year, last_w = last_week.split("-W")
             cur_year, cur_w = week_key.split("-W")
-            consecutive = (int(cur_year) == int(last_year) and int(cur_w) == int(last_w) + 1) or (
-                int(cur_year) == int(last_year) + 1 and int(last_w) >= 52 and int(cur_w) == 1
-            )
+            previous = datetime.fromisocalendar(int(last_year), int(last_w), 1)
+            current = datetime.fromisocalendar(int(cur_year), int(cur_w), 1)
+            consecutive = current - previous == timedelta(days=7)
         except Exception:
             consecutive = False
         streak = streak + 1 if consecutive else 1
@@ -953,14 +986,17 @@ def record_winner_incentive(
         }
     )
     save_message_state(guild_id, key, channel_id=None, message_id=None, payload=payload)
-    next_week = next_week_key_for()
-    if last_week != week_key and WINNER_BONUS_VOTES > 0:
+    year, week = week_key.split("-W")
+    won_monday = datetime.fromisocalendar(int(year), int(week), 1).replace(tzinfo=_ET)
+    next_week = next_week_key_for(won_monday)
+    if WINNER_BONUS_VOTES > 0:
         add_extra_vote_credits(
             guild_id,
             user_id,
             next_week,
             WINNER_BONUS_VOTES,
             source="winner_bonus",
+            grant_id=f"winner:{week_key}",
         )
     return {
         "total_wins": total_wins,
@@ -1012,7 +1048,7 @@ def compute_eligible_winner_ids(
         user_id = int(row["user_id"])
         category = str(row["category"])
         ticker = str(row["ticker"]).upper()
-        role = str(row.get("role_at_vote") or "NPC").upper()
+        role = str(row.get("role_at_vote") or "UNKNOWN").upper()
         is_early = bool(row.get("is_early"))
 
         if role != "NPC":

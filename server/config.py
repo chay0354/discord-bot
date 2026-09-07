@@ -93,7 +93,7 @@ CHANNEL_QA = os.getenv("QA_CHANNEL", "q-and-a")
 QA_CHANNEL_CANDIDATES = tuple(
     dict.fromkeys(
         n.strip()
-        for n in os.getenv("QA_CHANNEL_CANDIDATES", f"{CHANNEL_QA},q-and-a,faq").split(",")
+        for n in os.getenv("QA_CHANNEL_CANDIDATES", f"ℚ＆𝗔,{CHANNEL_QA},q-and-a,faq").split(",")
         if n.strip()
     )
 )

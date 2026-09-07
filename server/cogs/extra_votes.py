@@ -45,7 +45,13 @@ class ExtraVotesView(discord.ui.View):
             )
             return
         await interaction.response.defer(ephemeral=True)
-        week_key = database.voting_week_key_for_guild(interaction.guild.id)
+        week_key = await asyncio.to_thread(database.open_voting_week_key, interaction.guild.id)
+        if not week_key:
+            await interaction.followup.send(
+                "Extra-vote purchases open with voting. Please come back when voting is open.",
+                ephemeral=True,
+            )
+            return
         try:
             url = await asyncio.to_thread(
                 create_extra_votes_checkout_session,

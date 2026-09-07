@@ -17,7 +17,7 @@ def main() -> int:
     billing_src = (ROOT / "cogs" / "billing.py").read_text(encoding="utf-8")
     db_src = (ROOT / "database.py").read_text(encoding="utf-8")
     email_src = (ROOT / "services" / "email_client.py").read_text(encoding="utf-8")
-    proc_src = inspect.getsource(BillingCog.process_stripe_webhook_payload)
+    proc_src = inspect.getsource(BillingCog.process_stripe_webhook_payload) + inspect.getsource(BillingCog._process_stripe_event)
 
     required_events = {
         "checkout.session.completed",

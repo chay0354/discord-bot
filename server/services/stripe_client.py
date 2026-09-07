@@ -17,17 +17,17 @@ class StripeClientError(RuntimeError):
     pass
 
 
-def _settings() -> StripeSettings:
+def _settings(*, require_price: bool = False) -> StripeSettings:
     settings = StripeSettings()
     if not settings.secret_key:
         raise StripeClientError("STRIPE_SECRET_KEY is not set")
-    if not settings.price_id:
+    if require_price and not settings.price_id:
         raise StripeClientError("STRIPE_MONTHLY_PRICE_ID is not set")
     return settings
 
 
 def create_checkout_session(discord_id: int, username: str) -> str:
-    settings = _settings()
+    settings = _settings(require_price=True)
     response = requests.post(
         f"{STRIPE_API}/checkout/sessions",
         auth=(settings.secret_key, ""),
@@ -115,16 +115,20 @@ def create_billing_portal_session(customer_id: str) -> str:
 
 
 def verify_webhook_signature(payload: bytes, signature_header: str, webhook_secret: str) -> bool:
-    parts = dict(item.split("=", 1) for item in signature_header.split(",") if "=" in item)
-    timestamp = parts.get("t")
-    signature = parts.get("v1")
-    if not timestamp or not signature:
+    parts = [item.strip().split("=", 1) for item in signature_header.split(",") if "=" in item]
+    timestamp = next((v for k, v in parts if k == "t"), None)
+    signatures = [v for k, v in parts if k == "v1"]
+    if not timestamp or not signatures:
         return False
-    if abs(time.time() - int(timestamp)) > 300:
+    try:
+        age = abs(time.time() - int(timestamp))
+    except (ValueError, OverflowError):
+        return False
+    if age > 300:
         return False
     signed_payload = f"{timestamp}.".encode("utf-8") + payload
     expected = hmac.new(webhook_secret.encode("utf-8"), signed_payload, sha256).hexdigest()
-    return hmac.compare_digest(expected, signature)
+    return any(hmac.compare_digest(expected, signature) for signature in signatures)
 
 
 def retrieve_subscription(subscription_id: str) -> dict[str, Any]:

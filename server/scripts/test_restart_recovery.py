@@ -42,7 +42,7 @@ def custom_ids(view: WeeklyVotingView) -> list[str]:
     return [c.custom_id for c in view.children if getattr(c, "custom_id", None)]
 
 
-def main() -> int:
+async def main() -> int:
     print("\nScenario 1: early window restored within 24h is active")
     start = datetime.now(tz=UTC) - timedelta(hours=2)
     restore_early_window(start)
@@ -67,7 +67,7 @@ def main() -> int:
     print("\nScenario 5: recovery view routes clicks identically to Monday-open view")
     messy = ["$nvda", "amd ", "Pltr"]
     # Monday-open path (builds the message the user sees).
-    built = asyncio.run(build_weekly_voting_view(2, messy, fetch_quotes=False))
+    built = await build_weekly_voting_view(2, messy, fetch_quotes=False)
     # Recovery path mirrors weekly_picks.on_ready normalization.
     norm = [str(t).strip().lstrip("$").upper() for t in messy if t]
     recovered = WeeklyVotingView(2, norm)
@@ -86,4 +86,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

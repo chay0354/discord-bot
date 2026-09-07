@@ -21,6 +21,33 @@ from config import (
 )
 
 GATE_MARKER = "npc-gate-v1"  # legacy: delete if our bot posted one before
+RULES_GUIDE_MARKER = "stock-game-rules-v1"
+
+
+def rules_guide_embed(gate_url: str) -> discord.Embed:
+    embed = discord.Embed(
+        title="Welcome to MEME STOCK — how to play",
+        description=(
+            "A weekly community stock-picking game. This is not real trading or investment advice.\n\n"
+            f"**1. Join for free:** [open the entry message]({gate_url}) and react with 🔥 or 🚀 "
+            "to receive **NPC** and unlock the game channels.\n"
+            "**2. Pick stocks:** PLAYER / WINNER members submit real stocks in CHOOSE YOUR TICKER "
+            "during pre-vote (up to 20 unique stocks per category).\n"
+            "**3. Vote:** use the ticker buttons in WEEKLY PICKS. NPC gets **1 vote per category**; "
+            "PLAYER / WINNER gets **5**, plus purchased votes and bonuses. Paid tiers may stack votes.\n"
+            "**4. Win:** only NPC votes cast in the first **24 hours** qualify. Pick a top-voted "
+            "stock in **all three categories**. Tied leaders count. Staff, paying players and "
+            "active WINNER members cannot win. You must still be in the server when awards are given.\n\n"
+            "**Automatic schedule (New York time):** voting opens Monday **09:00**; "
+            "the early window ends Tuesday **09:00**; voting closes Friday **16:00**. "
+            "Manual games use the opening time announced on their ballot.\n\n"
+            "Subscribe in **PLAYER**, manage billing in **manage-subscription**, and find help in **Q&A**. "
+            "Extra-vote packs are one-time purchases for the indicated week, not subscriptions."
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=RULES_GUIDE_MARKER)
+    return embed
 
 
 class OnboardingCog(commands.Cog):
@@ -58,10 +85,13 @@ class OnboardingCog(commands.Cog):
             return
 
         gate: discord.Message | None = None
+        guide: discord.Message | None = None
         try:
             async for msg in channel.history(limit=50):
                 # Remove legacy duplicate embeds posted by this bot.
                 if msg.author.id == self.bot.user.id:
+                    if any(e.footer and e.footer.text == RULES_GUIDE_MARKER for e in msg.embeds):
+                        guide = msg
                     if any(e.footer and e.footer.text == GATE_MARKER for e in msg.embeds):
                         try:
                             await msg.delete()
@@ -83,6 +113,14 @@ class OnboardingCog(commands.Cog):
             return
 
         self._gate_message_ids[guild.id] = gate.id
+        embed = rules_guide_embed(gate.jump_url)
+        try:
+            if guide:
+                await guide.edit(embed=embed)
+            else:
+                await channel.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f"[onboarding] cannot publish game instructions in {guild.id}: {exc!r}", flush=True)
         print(
             f"[onboarding] bound gate msg {gate.id} in #{channel.name} "
             f"(author={gate.author})",

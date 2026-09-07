@@ -253,7 +253,7 @@ async def main() -> int:
 
     # Patch the billing module's external dependencies.
     billing.database = db
-    billing.StripeSettings = lambda: SimpleNamespace(webhook_secret=None, secret_key="x", price_id="y")
+    billing.StripeSettings = lambda: SimpleNamespace(webhook_secret="test-signing-secret", secret_key="x", price_id="y")
     billing.verify_webhook_signature = lambda *a, **k: True
 
     def fake_retrieve(sub_id):

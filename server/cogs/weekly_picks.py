@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Set, Tuple, Optional
 import asyncio
+from weakref import WeakValueDictionary
 from datetime import datetime, timedelta, timezone, date, time as dtime
 
 import discord
@@ -41,6 +42,7 @@ from cogs.submission_ui import OpenPickerView
 from discord_names import find_text_channel, member_role_keys
 
 UTC = timezone.utc
+_vote_locks: WeakValueDictionary[tuple[int, int], asyncio.Lock] = WeakValueDictionary()
 
 REQUIRED_WEEKLY_CHANNELS = [
     CHANNEL_SMALL_VOTE,
@@ -795,6 +797,10 @@ class WeeklyVotingView(discord.ui.View):
                 )
 
             db_count = int(ctx["vote_count"])
+            if save_key != category_key:
+                db_count = await asyncio.to_thread(
+                    database.user_vote_count, guild.id, week_key, save_key, member.id
+                )
             if db_count >= limit:
                 _log_vote("vote_rejected", reason="limit_reached", db_count=db_count, limit=limit)
                 return (
@@ -810,7 +816,7 @@ class WeeklyVotingView(discord.ui.View):
                 early_window_open=ctx.get("early_window_open"),
                 start_at=ctx.get("early_window_start_at"),
                 end_at=ctx.get("early_window_end_at"),
-            ) or is_early_window_active()
+            )
             is_early = early_active and role_at_vote == "NPC"
             ok, reason = await asyncio.to_thread(
                 database.record_vote,
@@ -849,6 +855,25 @@ class WeeklyVotingView(discord.ui.View):
             return False, "Your vote could not be saved. Please try again.", cat, category_key
 
     async def _handle_vote(
+        self,
+        interaction: discord.Interaction,
+        ticker: str,
+        *,
+        already_deferred: bool = False,
+    ):
+        if not already_deferred:
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except discord.InteractionResponded:
+                pass
+        # Shared across every ballot view: two simultaneous clicks must not
+        # both read the same remaining allowance before either vote is saved.
+        key = (getattr(interaction.guild, "id", 0), interaction.user.id)
+        lock = _vote_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            await self._handle_vote_locked(interaction, ticker, already_deferred=True)
+
+    async def _handle_vote_locked(
         self,
         interaction: discord.Interaction,
         ticker: str,
@@ -1108,6 +1133,11 @@ def _banner_description_with_timer(
     if end_utc is None:
         return base
     unix = int(end_utc.timestamp())
+    if datetime.now(tz=UTC) >= end_utc:
+        return (
+            f"{base}\n\n**Early winner window is closed** (ended <t:{unix}:F>).\n"
+            "You can still vote, but new votes do not qualify for WINNER."
+        )
     return (
         f"{base}\n\n"
         f"⏳ **Early winner window ends in:** <t:{unix}:R>\n"

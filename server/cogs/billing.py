@@ -5,6 +5,7 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Any
+from weakref import WeakValueDictionary
 
 from aiohttp import web
 import discord
@@ -36,6 +37,7 @@ from services.stripe_client import (
 # Stripe events the bot acts on.
 HANDLED_STRIPE_EVENTS = {
     "checkout.session.completed",
+    "checkout.session.async_payment_succeeded",
     "customer.subscription.created",
     "customer.subscription.updated",
     "customer.subscription.deleted",
@@ -44,6 +46,7 @@ HANDLED_STRIPE_EVENTS = {
 }
 
 ACTIVE_STATUSES = {"active", "trialing", "active_until_period_end"}
+_webhook_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
 
 def _find_text_channel(guild: discord.Guild, name: str) -> discord.TextChannel | None:
@@ -716,9 +719,16 @@ class BillingCog(commands.Cog):
         # A completed checkout session is a paid subscription even if the
         # subscription object could not be retrieved (root cause of demo bug:
         # session.status == "complete" was treated as inactive).
-        if event_type == "checkout.session.completed":
-            if (obj.get("payment_status") == "paid") or status in {"complete", "unknown"}:
-                status = "active"
+        if event_type.startswith("checkout.session."):
+            if obj.get("payment_status") in {"paid", "no_payment_required"}:
+                # A delayed checkout must not reactivate a subscription that
+                # Stripe now reports as canceled or otherwise inactive.
+                if subscription is None:
+                    status = "active"
+            else:
+                # Checkout completion alone is not settlement (delayed methods).
+                # Preserve a prior subscription until a payment event settles.
+                return discord_id, "unpaid"
         if event_type == "customer.subscription.deleted":
             status = "canceled"
         elif event_type == "invoice.payment_failed":
@@ -797,8 +807,11 @@ class BillingCog(commands.Cog):
         if not discord_id:
             database.log_event(None, "extra_votes_unresolved", {"event_id": event_id})
             return None, None
-        if obj.get("payment_status") not in {None, "paid", "no_payment_required"} and obj.get("status") != "complete":
+        if obj.get("payment_status") not in {"paid", "no_payment_required"}:
             return discord_id, "unpaid"
+        session_id = str(obj.get("id") or "")
+        if not session_id:
+            raise ValueError("Extra-votes checkout is missing its session id")
         try:
             guild_id = int(meta.get("guild_id") or 0)
         except (TypeError, ValueError):
@@ -810,8 +823,11 @@ class BillingCog(commands.Cog):
             pack = int(meta.get("pack_size") or EXTRA_VOTE_PACK_SIZE)
         except (TypeError, ValueError):
             pack = EXTRA_VOTE_PACK_SIZE
+        if pack <= 0:
+            raise ValueError("Extra-votes pack size must be positive")
         new_total = database.add_extra_vote_credits(
-            guild_id, discord_id, week_key, pack, source="stripe_purchase"
+            guild_id, discord_id, week_key, pack, source="stripe_purchase",
+            grant_id=f"stripe:{session_id}",
         )
         database.log_event(
             guild_id,
@@ -834,15 +850,25 @@ class BillingCog(commands.Cog):
         return discord_id, "extra_votes"
 
     async def process_stripe_webhook_payload(
+        self, payload: bytes, stripe_signature: str | None = None,
+    ) -> dict[str, Any]:
+        # Serialize delivery through both API listeners. A retry arriving while
+        # the first delivery awaits Discord must observe its final event state.
+        lock = _webhook_locks.setdefault("billing", asyncio.Lock())
+        async with lock:
+            return await self._process_stripe_event(payload, stripe_signature)
+
+    async def _process_stripe_event(
         self,
         payload: bytes,
         stripe_signature: str | None = None,
     ) -> dict[str, Any]:
         settings = StripeSettings()
-        if settings.webhook_secret:
-            signature = stripe_signature or ""
-            if not verify_webhook_signature(payload, signature, settings.webhook_secret):
-                raise ValueError("invalid signature")
+        if not settings.webhook_secret:
+            raise ValueError("Stripe webhook signing secret is not configured")
+        signature = stripe_signature or ""
+        if not verify_webhook_signature(payload, signature, settings.webhook_secret):
+            raise ValueError("invalid signature")
         event = json.loads(payload.decode("utf-8"))
         event_id = str(event.get("id") or "")
         event_type = event.get("type", "")
@@ -850,6 +876,8 @@ class BillingCog(commands.Cog):
 
         if event_type not in HANDLED_STRIPE_EVENTS:
             return {"received": True, "ignored": True, "type": event_type}
+        if not event_id:
+            raise ValueError("Stripe event id is required")
 
         # Idempotency: a duplicate delivery of an already-processed event is a
         # no-op (no double role, record, email, or status change).
@@ -858,15 +886,16 @@ class BillingCog(commands.Cog):
             if existing and existing.get("processed"):
                 print(f"[billing] Duplicate Stripe event {event_id} ({event_type}) — skipped", flush=True)
                 return {"received": True, "duplicate": True, "type": event_type}
-            try:
-                database.claim_stripe_event(event_id, event_type, event)
-            except Exception as exc:  # noqa: BLE001 - claim failure shouldn't drop the event
-                print(f"[billing] Could not record event {event_id}: {exc!r}", flush=True)
+            # If persistence is unavailable, fail before any role/credit side
+            # effects; Stripe will retry the delivery.
+            database.claim_stripe_event(event_id, event_type, event)
 
         try:
             meta = obj.get("metadata") or {}
-            if event_type == "checkout.session.completed" and str(meta.get("kind") or "") == "extra_votes":
+            if event_type.startswith("checkout.session.") and str(meta.get("kind") or "") == "extra_votes":
                 discord_id, status = await self._grant_purchased_votes(obj, event_id)
+            elif event_type.startswith("checkout.session.") and obj.get("mode") not in {None, "subscription"}:
+                discord_id, status = None, "ignored_checkout"
             else:
                 discord_id, status = await self._sync_subscription(obj, event_type, event_id)
         except Exception as exc:  # noqa: BLE001
