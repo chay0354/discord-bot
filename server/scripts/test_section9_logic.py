@@ -48,7 +48,21 @@ def main() -> int:
         fails.append("voting stage category validation missing")
 
     # 12 mocked: both APIs down -> reject
-    from cogs.submission_ui import resolve_ticker_any  # noqa: E402
+    from cogs.submission_ui import is_exact_ticker_symbol, resolve_ticker_any  # noqa: E402
+
+    # Exact-symbol gate: no prefix autocomplete, spaces rejected, real 1-letter OK
+    if is_exact_ticker_symbol("AAPL") != "AAPL":
+        fails.append("AAPL must be accepted as a full ticker")
+    if is_exact_ticker_symbol("$f") != "F":
+        fails.append("single-letter real tickers like F must be accepted")
+    if is_exact_ticker_symbol("A APL") is not None:
+        fails.append("tickers with spaces must be rejected")
+    if is_exact_ticker_symbol("APPLE INC") is not None:
+        fails.append("company names must be rejected")
+    if is_exact_ticker_symbol("") is not None:
+        fails.append("empty ticker must be rejected")
+    if is_exact_ticker_symbol("BRK.B") != "BRK.B":
+        fails.append("class-share tickers like BRK.B must be accepted")
 
     with patch("cogs.submission_ui.finnhub_resolve_symbol", return_value=None), patch(
         "cogs.submission_ui.yahoo_resolve_symbol", return_value=None

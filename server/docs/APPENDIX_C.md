@@ -670,6 +670,15 @@ python server/scripts/test_pre_vote_selection.py --regression-only
 supabase db dump -f backup.sql
 ```
 
+גיבוי JSON של טבלאות המשחק (בלי מפתחות API), מתוך תיקיית `server/`:
+
+```bash
+python scripts/backup_game_data.py --out backup.json
+python scripts/backup_game_data.py --restore backup.json
+```
+
+או עם מפתח אדמין: `GET /api/backup` ו-`GET /api/users`.
+
 או: Dashboard → **Table Editor** → Export CSV per table.
 
 ### 13.3 טבלאות קריטיות לשחזור

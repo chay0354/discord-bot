@@ -73,15 +73,19 @@ def main() -> int:
         fails.append("restart persistence doc missing")
 
     # 10) CRM inspection path
-    for path in ("/api/game/status", "/api/subscriptions", "/api/game/audit"):
+    for path in ("/api/game/status", "/api/subscriptions", "/api/game/audit", "/api/users", "/api/backup"):
         if path not in api_src:
             fails.append(f"CRM API path missing: {path}")
+    if "export_game_backup" not in db_src or "restore_game_backup" not in db_src:
+        fails.append("database backup/restore helpers missing")
+    if not (ROOT / "scripts" / "backup_game_data.py").is_file():
+        fails.append("backup_game_data.py script missing")
 
     # 11-12) Backup / restore documentation
     if "backup" not in appendix.lower() or "שחזור" not in appendix:
         fails.append("backup/restore documentation missing in APPENDIX_C")
-    if "supabase db dump" not in appendix.lower() and "backup" not in appendix.lower():
-        warnings.append("manual backup command should be documented")
+    if "backup_game_data.py" not in appendix and "supabase db dump" not in appendix.lower():
+        fails.append("manual backup command should be documented")
 
     if fails:
         print("SECTION 12 LOGIC: FAIL")

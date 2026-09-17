@@ -982,6 +982,7 @@ def record_winner_incentive(
             "total_wins": total_wins,
             "current_streak": streak,
             "last_week_key": week_key,
+            "bonus_votes": WINNER_BONUS_VOTES,
             "updated_at": utc_now_iso(),
         }
     )
@@ -1107,15 +1108,18 @@ def filter_eligible_winners_at_award(
     *,
     guild_member_ids: set[int] | None = None,
     player_or_paid_ids: set[int] | None = None,
+    blocking_role_user_ids: set[int] | None = None,
 ) -> tuple[list[int], list[dict[str, Any]]]:
     """Apply Friday-close rules that depend on the member's state *now*, not at vote time.
 
     - ``not_in_guild``: left the server or was banned (not in ``guild.members``).
     - ``now_player_or_paid``: became a paying PLAYER after voting as NPC in the early window.
+    - ``holds_blocking_role``: currently holds PLAYER / WINNER / ADMIN (not a pure NPC).
     """
     out: list[int] = []
     extra = list(exclusions)
     paid = player_or_paid_ids or set()
+    blocked_roles = blocking_role_user_ids or set()
     for user_id in eligible_ids:
         if guild_member_ids is not None and user_id not in guild_member_ids:
             extra.append(
@@ -1132,6 +1136,15 @@ def filter_eligible_winners_at_award(
                     "user_id": user_id,
                     "reason": "now_player_or_paid",
                     "detail": "has PLAYER role or active subscription at award time",
+                }
+            )
+            continue
+        if user_id in blocked_roles:
+            extra.append(
+                {
+                    "user_id": user_id,
+                    "reason": "holds_blocking_role",
+                    "detail": "holds PLAYER/WINNER/ADMIN at award time (not a pure NPC)",
                 }
             )
             continue
@@ -1387,23 +1400,25 @@ def log_event(guild_id: int | None, event_type: str, details: dict[str, Any]) ->
 
 
 # Subscription statuses that mean the user currently has PLAYER access.
-_PLAYER_ACTIVE_STATUSES = {"active", "active_until_period_end", "trialing"}
+_PLAYER_ACTIVE_STATUSES = {"active", "active_until_period_end", "trialing", "past_due_grace"}
 
 
-def player_grant_user_ids_since(since_iso: str) -> set[int]:
+def player_grant_user_ids_since(since_iso: str, guild_id: int | None = None) -> set[int]:
     """Distinct Discord IDs who gained PLAYER access at any point since `since_iso`.
 
-    Reads billing audit rows (`stripe_webhook`). This catches a user who became a
-    PLAYER during the week even if they later reverted to NPC — they must not win
-    the weekly competition. Returns an empty set on any error so winner
-    calculation never fails because of this lookup.
+    Reads billing audit rows (`stripe_webhook` and `player_role_granted`) so a
+    user who became a PLAYER mid-week — via Stripe *or* a manual/admin grant —
+    cannot win even if they later reverted to NPC.
     """
     try:
+        guild_filter = f"&guild_id=eq.{int(guild_id)}" if guild_id else ""
         rows = _select(
             "audit_logs",
             (
-                f"?select=details,created_at&event_type=eq.stripe_webhook"
+                f"?select=details,event_type,created_at"
+                f"&event_type=in.(stripe_webhook,player_role_granted)"
                 f"&created_at=gte.{quote(since_iso, safe='')}"
+                f"{guild_filter}"
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -1412,9 +1427,18 @@ def player_grant_user_ids_since(since_iso: str) -> set[int]:
     users: set[int] = set()
     for row in rows:
         details = row.get("details") or {}
-        status = str(details.get("status") or "")
+        event_type = str(row.get("event_type") or "")
         discord_id = details.get("discord_id")
-        if status in _PLAYER_ACTIVE_STATUSES and discord_id:
+        if not discord_id:
+            continue
+        if event_type == "player_role_granted":
+            try:
+                users.add(int(discord_id))
+            except (TypeError, ValueError):
+                continue
+            continue
+        status = str(details.get("status") or "")
+        if status in _PLAYER_ACTIVE_STATUSES:
             try:
                 users.add(int(discord_id))
             except (TypeError, ValueError):
@@ -1422,9 +1446,102 @@ def player_grant_user_ids_since(since_iso: str) -> set[int]:
     return users
 
 
-def count_player_grants_since(since_iso: str) -> int:
+def count_player_grants_since(since_iso: str, guild_id: int | None = None) -> int:
     """Best-effort count of distinct users who gained PLAYER access since `since_iso`."""
-    return len(player_grant_user_ids_since(since_iso))
+    return len(player_grant_user_ids_since(since_iso, guild_id))
+
+
+def list_users(limit: int = 200) -> list[dict[str, Any]]:
+    return _select(
+        "users",
+        f"?select=discord_id,username,full_name,email,phone,marketing_consent,created_at,updated_at"
+        f"&order=updated_at.desc&limit={int(limit)}",
+    )
+
+
+def export_game_backup(guild_id: int | None = None) -> dict[str, Any]:
+    """JSON snapshot of core game tables for CRM/admin backup (no API keys)."""
+    gid_q = f"&guild_id=eq.{int(guild_id)}" if guild_id else ""
+    return {
+        "exported_at": utc_now_iso(),
+        "guild_id": guild_id,
+        "users": _select("users", "?select=*&order=updated_at.desc&limit=5000"),
+        "subscriptions": _select("subscriptions", "?select=*&order=updated_at.desc&limit=5000"),
+        "votes": _select("votes", f"?select=*&order=created_at.desc&limit=10000{gid_q}"),
+        "ticker_picks": _select("ticker_picks", f"?select=*&limit=5000{gid_q}"),
+        "winners": _select("winners", f"?select=*&limit=2000{gid_q}"),
+        "game_cycles": _select("game_cycles", f"?select=*&limit=200{gid_q}"),
+        "message_state": _select("message_state", f"?select=*&limit=2000{gid_q}"),
+        "audit_logs": _select(
+            "audit_logs", f"?select=*&order=created_at.desc&limit=2000{gid_q}"
+        ),
+        "stripe_events": _select(
+            "stripe_events", "?select=id,type,created_at,processed&order=created_at.desc&limit=500"
+        ),
+    }
+
+
+def restore_game_backup(payload: dict[str, Any]) -> dict[str, int]:
+    """Restore users, subscriptions, cycles, and message_state. Does not replay votes."""
+    counts = {"users": 0, "subscriptions": 0, "game_cycles": 0, "message_state": 0}
+    for row in payload.get("users") or []:
+        try:
+            upsert_user(
+                int(row["discord_id"]),
+                username=row.get("username"),
+                full_name=row.get("full_name"),
+                email=row.get("email"),
+                phone=row.get("phone"),
+                marketing_consent=row.get("marketing_consent"),
+            )
+            counts["users"] += 1
+        except Exception:
+            continue
+    for row in payload.get("subscriptions") or []:
+        try:
+            upsert_subscription(
+                int(row["discord_id"]),
+                status=str(row.get("status") or "unknown"),
+                payment_status=row.get("payment_status"),
+                stripe_customer_id=row.get("stripe_customer_id"),
+                stripe_subscription_id=row.get("stripe_subscription_id"),
+                current_period_end=row.get("current_period_end"),
+                canceled_at=row.get("canceled_at"),
+                last_event_type=row.get("last_event_type"),
+                last_event_id=row.get("last_event_id"),
+            )
+            counts["subscriptions"] += 1
+        except Exception:
+            continue
+    for row in payload.get("game_cycles") or []:
+        try:
+            gid = int(row["guild_id"])
+            week_key = str(row["week_key"])
+            ensure_cycle(gid, week_key)
+            set_cycle_phase(
+                gid,
+                week_key,
+                status=str(row.get("status") or "idle"),
+                ticker_selection_open=bool(row.get("ticker_selection_open")),
+                voting_open=bool(row.get("voting_open")),
+                early_window_open=bool(row.get("early_window_open")),
+            )
+            counts["game_cycles"] += 1
+        except Exception:
+            continue
+    for row in payload.get("message_state") or []:
+        try:
+            save_message_state(
+                int(row["guild_id"]),
+                str(row["key"]),
+                channel_id=row.get("channel_id"),
+                message_id=row.get("message_id"),
+                payload=row.get("payload"),
+            )
+            counts["message_state"] += 1
+        except Exception:
+            continue
+    return counts
 
 
 def dump_json(data: Any) -> str:

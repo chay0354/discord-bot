@@ -7,8 +7,10 @@ import discord
 from discord.ext import commands
 
 import database
+import game_copy
 from config import (
     CHANNEL_EXTRA_VOTES,
+    CHANNEL_SMALL_TICKER,
     EXTRA_VOTE_PACK_CENTS,
     EXTRA_VOTE_PACK_SIZE,
     EXTRA_VOTES_CHANNEL_CANDIDATES,
@@ -16,7 +18,15 @@ from config import (
     ROLE_PLAYER,
     ROLE_WINNER,
 )
-from discord_names import deny_pin_and_slowmode, find_game_role, find_text_channel, member_role_keys
+from discord_names import (
+    apply_deny_pin_to_game_channels,
+    deny_pin_and_slowmode,
+    ensure_styled_channel,
+    ensure_styled_roles,
+    find_game_role,
+    find_text_channel,
+    member_role_keys,
+)
 from services.stripe_client import StripeClientError, create_extra_votes_checkout_session
 
 
@@ -88,7 +98,8 @@ def extra_votes_embed() -> discord.Embed:
             f"for the current voting week.\n"
             f"**Price:** ${dollars:.2f} (one-time, not a subscription).\n\n"
             "Credits are tied to your Discord ID. After Stripe confirms payment, "
-            "your vote limit updates automatically."
+            "your vote limit updates automatically.\n\n"
+            f"{game_copy.NOT_INVESTMENT_ADVICE}"
         ),
         color=discord.Color.green(),
     )
@@ -104,11 +115,15 @@ class ExtraVotesCog(commands.Cog):
         for guild in self.bot.guilds:
             try:
                 await self._ensure_channel(guild)
+                await apply_deny_pin_to_game_channels(guild)
             except Exception as exc:
                 print(f"[extra_votes] setup failed for {guild.id}: {exc!r}", flush=True)
 
     async def _ensure_channel(self, guild: discord.Guild) -> None:
-        ch = _find_channel(guild, EXTRA_VOTES_CHANNEL_CANDIDATES)
+        await ensure_styled_roles(guild)
+        ch = await ensure_styled_channel(
+            guild, CHANNEL_EXTRA_VOTES, *EXTRA_VOTES_CHANNEL_CANDIDATES
+        )
         player = find_game_role(guild, "PLAYER")
         winner = find_game_role(guild, "WINNER")
         admin = find_game_role(guild, "ADMIN")
@@ -127,24 +142,37 @@ class ExtraVotesCog(commands.Cog):
             overwrites[me] = discord.PermissionOverwrite(
                 view_channel=True, send_messages=True, manage_messages=True
             )
+        ticker_ch = find_text_channel(guild, CHANNEL_SMALL_TICKER)
+        parent = ticker_ch.category if ticker_ch else None
         if not ch:
             ch = await guild.create_text_channel(
                 CHANNEL_EXTRA_VOTES,
                 overwrites=overwrites,
+                category=parent,
                 reason="Extra-votes purchase channel",
             )
         else:
+            edits: dict = {"overwrites": overwrites}
+            if ch.name != CHANNEL_EXTRA_VOTES:
+                edits["name"] = CHANNEL_EXTRA_VOTES
+            if parent is not None and ch.category != parent:
+                edits["category"] = parent
             try:
-                await ch.edit(overwrites=overwrites, reason="Extra-votes permission sync")
+                await ch.edit(**edits, reason="Extra-votes permission sync")
             except (discord.Forbidden, discord.HTTPException):
                 pass
-        posted = False
+        posted = None
         async for msg in ch.history(limit=15):
             if msg.author == guild.me and msg.embeds and (msg.embeds[0].title or "") == "Buy extra votes":
-                posted = True
+                posted = msg
                 break
-        if not posted:
-            await ch.send(embed=extra_votes_embed(), view=ExtraVotesView())
+        if posted is None:
+            posted = await ch.send(embed=extra_votes_embed(), view=ExtraVotesView())
+        if not posted.pinned:
+            try:
+                await posted.pin(reason="Keep extra-votes checkout visible")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
 
 async def setup(bot: commands.Bot) -> None:

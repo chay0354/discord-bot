@@ -46,12 +46,12 @@ class PureTests(unittest.TestCase):
     def test_styled_qa_is_a_candidate(self):
         self.assertTrue(any(names_match("ℚ＆𝗔", name) for name in QA_CHANNEL_CANDIDATES))
 
-    def test_qa_falls_back_when_first_channel_is_inaccessible(self):
-        blocked = SimpleNamespace(name="ℚ＆𝗔", permissions_for=lambda _: SimpleNamespace(view_channel=False))
-        usable = SimpleNamespace(name="q-and-a", permissions_for=lambda _: SimpleNamespace(
+    def test_qa_prefers_styled_top_channel(self):
+        styled = SimpleNamespace(name="ℚ＆𝗔", permissions_for=lambda _: SimpleNamespace(view_channel=False))
+        fallback = SimpleNamespace(name="q-and-a", permissions_for=lambda _: SimpleNamespace(
             view_channel=True, send_messages=True, read_message_history=True))
-        guild = SimpleNamespace(me=object(), text_channels=[blocked, usable])
-        self.assertIs(_find_channel(guild, ("ℚ＆𝗔", "q-and-a")), usable)
+        guild = SimpleNamespace(me=object(), text_channels=[styled, fallback])
+        self.assertIs(_find_channel(guild, ("ℚ＆𝗔", "q-and-a")), styled)
 
     def test_signature_rejects_invalid_timestamp(self):
         self.assertFalse(verify_webhook_signature(b"{}", "t=invalid,v1=abcd", "secret"))

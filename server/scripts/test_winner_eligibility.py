@@ -187,6 +187,20 @@ def main() -> int:
     )
     check("pure npc still wins", ids == [808], str(ids))
 
+    print("\nScenario 11: current WINNER/ADMIN blocked at award")
+    ids, ex = filter_eligible_winners_at_award(
+        base_ids,
+        [],
+        guild_member_ids={808},
+        player_or_paid_ids=set(),
+        blocking_role_user_ids={808},
+    )
+    check("current winner/admin excluded", ids == [], str(ids))
+    check(
+        "holds_blocking_role reason logged",
+        any(r["reason"] == "holds_blocking_role" for r in ex),
+    )
+
     print("\n" + ("=" * 52))
     if failures:
         print(f"RESULT: FAILED ({len(failures)}): {', '.join(failures)}")

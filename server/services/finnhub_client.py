@@ -89,14 +89,17 @@ def get_company_profile(symbol: str) -> dict | None:
     normalized = symbol.upper().strip().lstrip("$")
     now = time.time()
     cached = _PROFILE_CACHE.get(normalized)
-    if cached and now - cached[0] < 3600:
+    if cached and cached[1] is not None and now - cached[0] < 3600:
         return cached[1]
     try:
         data = _get("stock/profile2", {"symbol": normalized})
-        profile = data if data.get("ticker") else None
+        # Some valid US listings omit `ticker` but still return name/exchange.
+        profile = data if (data.get("ticker") or data.get("name") or data.get("exchange")) else None
     except Exception:
-        profile = None
-    _PROFILE_CACHE[normalized] = (now, profile)
+        # Never cache a transport/rate-limit failure as "symbol does not exist".
+        return None
+    if profile:
+        _PROFILE_CACHE[normalized] = (now, profile)
     return profile
 
 
@@ -116,8 +119,30 @@ def _exchange_is_us_major(exchange: str) -> bool:
     up = str(exchange or "").upper()
     if "NASDAQ" in up or "NYSE" in up:
         return True
-    # Finnhub sometimes spells these out.
-    return "NEW YORK STOCK EXCHANGE" in up or "NASDAQ NMS" in up
+    # Finnhub / Yahoo spell these several ways. NYSE American is still NYSE.
+    return any(
+        token in up
+        for token in (
+            "NEW YORK STOCK EXCHANGE",
+            "NASDAQ NMS",
+            "NYSE AMERICAN",
+            "NYSE MKT",
+            "AMEX",
+        )
+    )
+
+
+def _search_exact_symbol(symbol: str) -> dict | None:
+    """Finnhub symbol search, exact ticker only — never prefix autocomplete."""
+    try:
+        data = _get("search", {"q": symbol})
+    except Exception:
+        return None
+    want = symbol.upper()
+    for row in data.get("result") or []:
+        if str(row.get("symbol") or "").upper() == want:
+            return row
+    return None
 
 
 def resolve_symbol(symbol: str) -> dict | None:
@@ -136,7 +161,23 @@ def resolve_symbol(symbol: str) -> dict | None:
         alt = normalized.replace("-", ".") if "-" in normalized else normalized.replace(".", "-")
         profile = get_company_profile(alt)
     if not profile:
-        return None
+        # Some real NASDAQ/NYSE names have a thin profile2 payload. An exact
+        # search hit still proves the ticker exists; quote supplies cap.
+        hit = _search_exact_symbol(normalized)
+        if not hit:
+            return None
+        kind = str(hit.get("type") or "").lower()
+        if kind and kind not in {"common stock", "etp", "etf", "adr", "equity", ""}:
+            return None
+        return {
+            "symbol": normalized,
+            "shortName": hit.get("description") or "",
+            "exchange": str(hit.get("primary") or ""),
+            "marketCap": None,
+            "category": None,
+            "exchange_ok": True,
+            "source": "finnhub-search",
+        }
     # NOTE: We intentionally do NOT require profile["ticker"] == typed symbol.
     # For dual-class shares Finnhub returns the primary class (e.g. GOOG -> GOOGL,
     # BRK.B -> BRK.A); rejecting on that mismatch wrongly blocked valid US stocks.

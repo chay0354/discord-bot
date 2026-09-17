@@ -41,6 +41,8 @@ def main() -> int:
     )
     if "database.vote_counts" not in src_post:
         fails.append("live board must read counts from DB")
+    if "is_voting_open" not in src_post:
+        fails.append("live board must not overwrite CHANNEL CURRENTLY CLOSED after voting ends")
 
     # Vote persistence is DB-first: the vote is saved via record_vote BEFORE the
     # live count updates, so the leaderboard only refreshes after a confirmed

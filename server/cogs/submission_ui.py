@@ -1,6 +1,7 @@
 # cogs/submission_ui.py
 
 import asyncio
+import re
 from typing import List, Tuple, Dict
 
 import discord
@@ -24,7 +25,13 @@ from config import (
     TICKER_CHANNEL_BY_CATEGORY,
     TICKER_LIMIT_PER_CATEGORY,
 )
-from discord_names import find_text_channel, member_role_keys, names_match, normalize_discord_name
+from discord_names import (
+    ensure_styled_channel,
+    find_text_channel,
+    member_role_keys,
+    names_match,
+    normalize_discord_name,
+)
 import game_copy
 from services.finnhub_client import (
     resolve_symbol as finnhub_resolve_symbol,
@@ -35,6 +42,39 @@ from services.yahoo_client import (
     resolve_symbol as yahoo_resolve_symbol,
     search_symbols_by_query,
 )
+
+
+_TICKER_SYMBOL_RE = re.compile(r"^[A-Z]{1,5}([.-][A-Z0-9]{1,2})?$")
+_EXPIRED_BUTTON_MSG = (
+    "That button is no longer active. Press **CHOOSE TICKER** on the latest "
+    "channel message and type the full ticker symbol."
+)
+
+
+def is_exact_ticker_symbol(query: str) -> str | None:
+    """Normalize a typed symbol. Returns the symbol or None if incomplete.
+
+    Never prefix-matches (``A`` does not become ``AAPL``). Single-letter
+    symbols like ``F`` / ``T`` / ``A`` are accepted only when they are the
+    full ticker. Spaces and junk characters are rejected.
+    """
+    q = (query or "").upper().strip().lstrip("$")
+    if not q or any(ch.isspace() for ch in q):
+        return None
+    if not _TICKER_SYMBOL_RE.match(q):
+        return None
+    return q
+
+
+async def _safe_interaction_reply(interaction: discord.Interaction, message: str) -> None:
+    """Best-effort user-facing reply when a button/modal fails."""
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(message, ephemeral=True)
+        else:
+            await interaction.followup.send(message, ephemeral=True)
+    except (discord.NotFound, discord.HTTPException, discord.InteractionResponded):
+        pass
 
 
 def resolve_ticker_any(symbol: str) -> dict | None:
@@ -177,6 +217,19 @@ async def _find_pick_results_message(pr_ch: discord.TextChannel) -> tuple[discor
     return None
 
 
+def _pick_results_closed_embed(guild=None) -> discord.Embed:
+    return discord.Embed(
+        title="LIVE CHOSEN TICKERS — CLOSED",
+        description=game_copy.live_chosen_tickers_closed_for_voting(guild),
+        color=discord.Color.dark_grey(),
+    )
+
+
+def _is_closed_pick_results_embed(emb: discord.Embed) -> bool:
+    title = (emb.title or "").upper()
+    return "CLOSED" in title and ("LIVE CHOSEN" in title or "PICK RESULTS" in title)
+
+
 def _pick_results_embed_scaffold(guild=None) -> discord.Embed:
     emb = discord.Embed(
         title="LIVE CHOSEN TICKERS — OPEN",
@@ -232,20 +285,68 @@ async def _refresh_pick_results_embed_from_db(
     emb: discord.Embed,
 ) -> discord.Embed:
     """Mirror ticker_picks into #pick-results during pre-vote or voting."""
+    if database.is_voting_open(guild.id):
+        return emb
     week_key = _pick_results_week_key_for_guild(guild.id)
     if not week_key:
         return emb
     stored = database.list_tickers(guild.id, week_key)
-    ballot_locked = database.is_voting_open(guild.id)
-    new_emb = _pick_results_embed_from_tickers(
-        stored, ballot_locked=ballot_locked, guild=guild
-    )
+    new_emb = _pick_results_embed_from_tickers(stored, guild=guild)
     await msg.edit(embed=new_emb)
     return new_emb
 
 
+async def close_pick_results_for_voting(
+    guild: discord.Guild,
+) -> tuple[discord.Message, discord.Embed] | None:
+    """Delete the weekend ticker table and post a closed pointer to WEEKLY PICKS."""
+    pr_ch = await _get_pick_results_channel(guild)
+    if pr_ch is None:
+        return None
+    _load_pick_results_msg_id_from_db(guild.id)
+    found: tuple[discord.Message, discord.Embed] | None = None
+    cached_id = _pick_results_msg_id.get(guild.id)
+    if cached_id:
+        try:
+            msg = await pr_ch.fetch_message(cached_id)
+            if msg.embeds:
+                found = (msg, msg.embeds[0])
+        except Exception:
+            _pick_results_msg_id.pop(guild.id, None)
+    if not found:
+        found = await _find_pick_results_message(pr_ch)
+    if found and _is_closed_pick_results_embed(found[1]):
+        _pick_results_msg_id[guild.id] = found[0].id
+        return found
+    if found:
+        try:
+            await found[0].delete()
+        except Exception:
+            pass
+    async for leftover in pr_ch.history(limit=30):
+        if leftover.author != guild.me or not leftover.embeds:
+            continue
+        title = (leftover.embeds[0].title or "").lower()
+        if "pick results" in title or "live chosen" in title or "chosen ticker" in title:
+            if not _is_closed_pick_results_embed(leftover.embeds[0]):
+                try:
+                    await leftover.delete()
+                except Exception:
+                    pass
+    sent = await pr_ch.send(embed=_pick_results_closed_embed(guild))
+    _pick_results_msg_id[guild.id] = sent.id
+    _persist_pick_results_state(guild.id, pr_ch.id, sent.id)
+    return sent, sent.embeds[0]
+
+
 async def sync_pick_results_from_db(guild: discord.Guild) -> tuple[discord.Message, discord.Embed] | None:
-    """Refresh the #pick-results embed from ticker_picks for the active pre-vote or voting week."""
+    """Refresh the #pick-results embed from ticker_picks for the active pre-vote week.
+
+    While weekly voting is open the weekend table is replaced by a CLOSED pointer,
+    not kept as a live ballot table.
+    """
+    if database.is_voting_open(guild.id):
+        return await close_pick_results_for_voting(guild)
     found = await _ensure_pick_results_message(guild)
     if not found:
         return None
@@ -279,6 +380,8 @@ def _load_pick_results_msg_id_from_db(guild_id: int) -> None:
 
 
 async def _ensure_pick_results_message(guild: discord.Guild) -> tuple[discord.Message, discord.Embed] | None:
+    if database.is_voting_open(guild.id):
+        return await close_pick_results_for_voting(guild)
     pr_ch = await _get_pick_results_channel(guild)
     if pr_ch is None:
         return None
@@ -569,6 +672,13 @@ class TickerEntryModal(discord.ui.Modal, title="CHOOSE TICKER"):
                 "Please type the full ticker symbol.", ephemeral=True
             )
             return
+        if is_exact_ticker_symbol(raw) is None:
+            await interaction.response.send_message(
+                "Type one full ticker symbol (letters only, optional `$`). "
+                "Example: `NVDA`, `$AAPL`, or `F`. Spaces and partial names are not accepted.",
+                ephemeral=True,
+            )
+            return
         await self.parent_view.submit_ticker(interaction, raw)
 
 
@@ -589,6 +699,19 @@ class StockPickerView(discord.ui.View):
         )
         self.try_btn.callback = self.on_try_ticker
         self.add_item(self.try_btn)
+
+    async def on_timeout(self) -> None:
+        self.frozen = True
+        self.try_btn.disabled = True
+
+    async def on_error(
+        self,
+        error: Exception,
+        item: discord.ui.Item,
+        interaction: discord.Interaction,
+    ) -> None:
+        print(f"[StockPickerView] {item} failed: {error!r}", flush=True)
+        await _safe_interaction_reply(interaction, _EXPIRED_BUTTON_MSG)
 
     async def on_try_ticker(self, interaction: discord.Interaction) -> None:
         if self.frozen:
@@ -626,6 +749,15 @@ class StockPickerView(discord.ui.View):
         if not _can_choose_weekly_ticker(interaction.user):
             await interaction.followup.send(
                 "Only PLAYER subscribers, active WINNERS, and admins can choose weekly tickers.",
+                ephemeral=True,
+            )
+            return
+
+        if await _is_channel_closed(self.channel):
+            await interaction.followup.send(
+                game_copy.ticker_channel_closed(
+                    _category_index_for_channel(self.channel), interaction.guild
+                ),
                 ephemeral=True,
             )
             return
@@ -687,16 +819,18 @@ class StockPickerView(discord.ui.View):
           status == "no_market_cap" -> exists on NASDAQ/NYSE but cap unavailable
           status == "wrong_category"-> valid stock, but belongs to another category
         """
-        q = query.upper().strip().lstrip("$")
+        q = is_exact_ticker_symbol(query)
         category = category_for_channel(self.channel.name)
-        if not q or " " in q:
-            return "not_found", q, None
-        # Exact symbol only — never prefix-match "A" onto AAPL / AMD / etc.
-        if not q.isalnum() and not any(sep in q for sep in (".", "-")):
-            return "not_found", q, None
+        if not q:
+            return "not_found", (query or "").upper().strip().lstrip("$"), None
 
         finnhub_pop_last_error()  # clear any stale error before this lookup
         row = resolve_ticker_any(q)
+        # Belt-and-suspenders: never accept a different symbol than what was typed
+        # (separator variants BRK.B / BRK-B are the only allowed mismatch).
+        resolved = str((row or {}).get("symbol") or "").upper()
+        if row and resolved and resolved.replace(".", "-") != q.replace(".", "-"):
+            return "not_found", q, None
         if not row:
             # Distinguish a genuine "no such ticker" from a Finnhub API failure
             # (network/timeout/rate-limit/5xx) so admins see WHAT failed.
@@ -982,15 +1116,6 @@ class OpenPickerView(discord.ui.View):
             )
             return
 
-        if await _is_channel_closed(channel):
-            await interaction.response.send_message(
-                game_copy.ticker_channel_closed(
-                    _category_index_for_channel(channel), interaction.guild
-                ),
-                ephemeral=True,
-            )
-            return
-
         try:
             picker = StockPickerView(channel=channel, user_id=member.id)
             await interaction.response.send_modal(TickerEntryModal(picker))
@@ -998,17 +1123,16 @@ class OpenPickerView(discord.ui.View):
             pass
         except Exception as e:  # noqa: BLE001
             print("[OpenPickerView] Exception:", repr(e))
-            try:
-                msg = (
-                    "That button is no longer active. Press **CHOOSE TICKER** again "
-                    "and type the full ticker symbol."
-                )
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(msg, ephemeral=True)
-                else:
-                    await interaction.followup.send(msg, ephemeral=True)
-            except Exception:
-                pass
+            await _safe_interaction_reply(interaction, _EXPIRED_BUTTON_MSG)
+
+    async def on_error(
+        self,
+        error: Exception,
+        item: discord.ui.Item,
+        interaction: discord.Interaction,
+    ) -> None:
+        print(f"[OpenPickerView] {item} failed: {error!r}", flush=True)
+        await _safe_interaction_reply(interaction, _EXPIRED_BUTTON_MSG)
 
 
 class OpenPickerViewMulti(discord.ui.View):
@@ -1114,17 +1238,19 @@ def _extract_lists_from_pick_results(emb: discord.Embed) -> List[List[str]]:
 
 
 async def _clear_pick_results_message(msg: discord.Message, emb: discord.Embed) -> None:
-    new = discord.Embed(
-        title=emb.title, description=emb.description, color=emb.color)
-    new.add_field(name=f"{CATEGORY_TITLES['small']} (0/{TICKER_LIMIT_PER_CATEGORY})", value="—", inline=False)
-    new.add_field(name=f"{CATEGORY_TITLES['mid']} (0/{TICKER_LIMIT_PER_CATEGORY})", value="—", inline=False)
-    new.add_field(name=f"{CATEGORY_TITLES['blue']} (0/{TICKER_LIMIT_PER_CATEGORY})", value="—", inline=False)
+    new = _pick_results_embed_scaffold(msg.guild)
     await msg.edit(embed=new)
 
 
 class SubmissionUICog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    async def cog_load(self) -> None:
+        try:
+            self.bot.add_view(OpenPickerView())
+        except Exception as exc:  # noqa: BLE001
+            print("[submission_ui] cog_load add_view(OpenPickerView) failed:", repr(exc))
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -1134,11 +1260,31 @@ class SubmissionUICog(commands.Cog):
         self._pick_results_synced = True
         for guild in self.bot.guilds:
             try:
+                await ensure_styled_channel(
+                    guild, CHANNEL_PICK_RESULTS, *PICK_RESULTS_CHANNEL_CANDIDATES
+                )
                 if database.is_ticker_selection_open(guild.id) or database.is_voting_open(guild.id):
                     await sync_pick_results_from_db(guild)
                     print(f"[submission_ui] pick-results synced from DB for guild {guild.id}", flush=True)
             except Exception as exc:
                 print(f"[submission_ui] pick-results sync failed for {guild.id}: {exc!r}", flush=True)
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        """Rebuild the live-chosen-tickers board if it was deleted."""
+        if payload.guild_id is None:
+            return
+        cached_id = _pick_results_msg_id.get(payload.guild_id)
+        if cached_id != payload.message_id:
+            return
+        guild = self.bot.get_guild(payload.guild_id)
+        if guild is None:
+            return
+        _pick_results_msg_id.pop(payload.guild_id, None)
+        try:
+            await sync_pick_results_from_db(guild)
+        except Exception as exc:
+            print(f"[submission_ui] restore pick-results failed: {exc!r}", flush=True)
 
     @commands.command(name="ui_picker")
     async def ui_picker(self, ctx: commands.Context):

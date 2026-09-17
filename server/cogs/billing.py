@@ -12,6 +12,7 @@ import discord
 from discord.ext import commands, tasks
 
 import database
+import game_copy
 from config import (
     CHANNEL_MOD,
     EXTRA_VOTE_PACK_SIZE,
@@ -42,6 +43,7 @@ HANDLED_STRIPE_EVENTS = {
     "customer.subscription.updated",
     "customer.subscription.deleted",
     "invoice.payment_succeeded",
+    "invoice.paid",
     "invoice.payment_failed",
 }
 
@@ -90,7 +92,8 @@ def player_subscribe_embed() -> discord.Embed:
             "• Access to **live leaderboard** channels\n"
             "• Ticker pick channels during pre-vote\n"
             "• Option to buy extra votes in the extra-votes channel\n\n"
-            "Click **Subscribe**, then **Pay on Stripe** to complete checkout."
+            "Click **Subscribe**, then **Pay on Stripe** to complete checkout.\n\n"
+            f"{game_copy.NOT_INVESTMENT_ADVICE}"
         ),
         color=discord.Color.green(),
     )
@@ -553,10 +556,12 @@ class BillingCog(commands.Cog):
         prevent the PLAYER role from being granted (root cause of the demo bug).
         """
         changed = False
+        found_member = False
         for guild in self.bot.guilds:
             member = await self._resolve_member(guild, discord_id)
             if not member:
                 continue
+            found_member = True
             role = find_game_role(guild, "PLAYER")
             if not role:
                 await self._mod_log(
@@ -610,6 +615,15 @@ class BillingCog(commands.Cog):
                     f"Could not update <@{discord_id}>: {exc}.",
                     discord.Color.orange(),
                 )
+        if active and not found_member and self.bot.guilds:
+            await self._mod_log(
+                self.bot.guilds[0],
+                "PLAYER role pending",
+                f"<@{discord_id}> has an active subscription but is not in the server yet "
+                "(or the member cache missed). Role will be granted on join or the next "
+                "5-minute reconcile.",
+                discord.Color.orange(),
+            )
         return changed
 
     async def _notify(
@@ -874,6 +888,11 @@ class BillingCog(commands.Cog):
         event_type = event.get("type", "")
         obj = (event.get("data") or {}).get("object") or {}
 
+        # Stripe CLI / Dashboard sometimes emit invoice.paid instead of
+        # invoice.payment_succeeded — treat them as the same settlement event.
+        if event_type == "invoice.paid":
+            event_type = "invoice.payment_succeeded"
+
         if event_type not in HANDLED_STRIPE_EVENTS:
             return {"received": True, "ignored": True, "type": event_type}
         if not event_id:
@@ -886,9 +905,12 @@ class BillingCog(commands.Cog):
             if existing and existing.get("processed"):
                 print(f"[billing] Duplicate Stripe event {event_id} ({event_type}) — skipped", flush=True)
                 return {"received": True, "duplicate": True, "type": event_type}
-            # If persistence is unavailable, fail before any role/credit side
-            # effects; Stripe will retry the delivery.
-            database.claim_stripe_event(event_id, event_type, event)
+            claimed = database.claim_stripe_event(event_id, event_type, event)
+            if not claimed:
+                existing = database.get_stripe_event(event_id)
+                if existing and existing.get("processed"):
+                    return {"received": True, "duplicate": True, "type": event_type}
+                # Unprocessed existing row = Stripe retry after a failed attempt.
 
         try:
             meta = obj.get("metadata") or {}
@@ -914,6 +936,20 @@ class BillingCog(commands.Cog):
                 pass
             # Re-raise so Stripe retries; idempotency makes the retry safe.
             raise
+
+        if discord_id is None and status is None:
+            # Do NOT mark processed=true — Stripe (or an admin resync) can retry.
+            database.mark_stripe_event_processed(event_id, error="unresolved_discord_id")
+            if event_type.startswith("checkout.session."):
+                raise ValueError(f"Could not resolve Discord user for {event_type}")
+            return {
+                "received": True,
+                "unresolved": True,
+                "type": event_type,
+                "discord_id": None,
+                "status": None,
+            }
+
         database.mark_stripe_event_processed(event_id, discord_id=discord_id, status=status)
         return {"received": True, "type": event_type, "discord_id": discord_id, "status": status}
 

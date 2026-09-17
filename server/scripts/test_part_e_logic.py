@@ -84,6 +84,17 @@ def main() -> int:
     sched_src = inspect.getsource(__import__("cogs.scheduler", fromlist=["SchedulerCog"]).SchedulerCog)
     if "record_winner_incentive" not in sched_src:
         fails.append("Friday close must record winner incentives")
+    if "winner_incentive_lines" not in sched_src:
+        fails.append("winner card must show streak / bonus lines")
+    if "winner_incentive_lines" not in (ROOT / "game_copy.py").read_text(encoding="utf-8"):
+        fails.append("winner DM must include visible incentive copy")
+    if "ensure_styled_channel" not in extra_src or "ensure_styled_roles" not in extra_src:
+        fails.append("extra-votes must create/rename the channel and apply role emojis")
+    if "create_text_channel" not in qa_src or "CHANNEL_QA" not in qa_src:
+        fails.append("Q&A must create/post on the canonical ℚ＆𝗔 channel")
+    cfg = (ROOT / "config.py").read_text(encoding="utf-8")
+    if '"ℚ＆𝗔"' not in cfg:
+        fails.append("Q&A canonical channel must default to ℚ＆𝗔")
 
     if fails:
         print("PART E LOGIC: FAIL")

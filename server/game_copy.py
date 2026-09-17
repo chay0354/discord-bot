@@ -11,6 +11,7 @@ from typing import Iterable
 from config import (
     CATEGORIES,
     CATEGORY_TITLES,
+    WINNER_BONUS_VOTES,
     CHANNEL_BLUE_LIVE,
     CHANNEL_BLUE_TICKER,
     CHANNEL_BLUE_VOTE,
@@ -72,7 +73,7 @@ def mention(guild, names: Iterable[str], fallback: str) -> str:
 
 
 def mention_player(guild) -> str:
-    return mention(guild, (CHANNEL_PLAYER, *PLAYER_CHANNEL_CANDIDATES), "#𝐏𝐋𝐀𝐘𝐄𝐑")
+    return mention(guild, (CHANNEL_PLAYER, *PLAYER_CHANNEL_CANDIDATES), "#💎𝐏𝐋𝐀𝐘𝐄𝐑💎")
 
 
 def mention_pick_results(guild) -> str:
@@ -181,9 +182,19 @@ def vote_picked_line(
     count: int,
     limit: int,
     guild=None,
+    *,
+    is_npc: bool = False,
 ) -> str:
     live = mention_live(guild, cat)
-    return f"YOU PICKED ${ticker} — You Have {count}/{limit} Picks. Watch results live in {live}"
+    line = f"YOU PICKED ${ticker} — You Have {count}/{limit} Picks. Watch results live in {live}"
+    if is_npc:
+        title = CATEGORY_PLAIN[cat_key(cat)]
+        player = mention_player(guild)
+        line += (
+            f"\nTo get access to the {title} live leaderboard and vote up to 5 times, "
+            f"subscribe in {player}."
+        )
+    return line
 
 
 def vote_limit_message(cat: int | str, *, is_npc: bool, guild=None) -> str:
@@ -208,12 +219,14 @@ def vote_limit_message(cat: int | str, *, is_npc: bool, guild=None) -> str:
 def voting_closed_description(guild=None) -> str:
     lb = mention_leaderboard(guild)
     winners = mention_winners(guild)
+    player = mention_player(guild)
     return (
         "Voting will resume Monday at 9 AM EST.\n"
         "To review this week’s top-ranked tickers and winners:\n"
         f"{lb}\n"
         f"{winners}\n"
-        "CHOOSE YOUR TICKER is now open for #PLAYER and WINNER roles."
+        f"CHOOSE YOUR TICKER is now open for {player} and WINNER roles.\n"
+        f"{NOT_INVESTMENT_ADVICE}"
     )
 
 
@@ -221,7 +234,8 @@ def live_channel_closed_description(cat: int | str) -> str:
     title = CATEGORY_PLAIN[cat_key(cat)]
     return (
         "The channel will reopen next Monday at 9 AM EST.\n"
-        f"Here you can track live voting results for the {title} category."
+        f"Here you can track live voting results for the {title} category.\n"
+        f"{NOT_INVESTMENT_ADVICE}"
     )
 
 
@@ -247,7 +261,8 @@ def midweek_leaderboard_description(guild=None) -> str:
         f"{mid}\n"
         f"{large}\n"
         "This week’s results will be shown in this channel when voting closes on Friday at 4PM EST.\n"
-        f"To get access to the live leaderboards and more, join {player}."
+        f"To get access to the live leaderboards and more, join {player}.\n"
+        f"{NOT_INVESTMENT_ADVICE}"
     )
 
 
@@ -275,7 +290,8 @@ def ticker_channel_open_description(cat: int | str, guild=None) -> str:
         "Each PLAYER subscriber can choose only one ticker per category to participate in the weekly competition.\n"
         f"Press the **{CHOOSE_TICKER_BUTTON}** button.\n"
         f"When the window opens, type the **full ticker symbol** you want from the {title} category and press Enter.\n"
-        f"Your ticker will be registered automatically and updated in the table in {results}."
+        f"Your ticker will be registered automatically and updated in the table in {results}.\n"
+        f"{NOT_INVESTMENT_ADVICE}"
     )
 
 
@@ -316,14 +332,48 @@ def live_chosen_tickers_description(guild=None) -> str:
         f"{small} • {mid} • {large}\n"
         "Each category closes after reaching 20 different tickers.\n"
         "On Monday at 9 AM EST, the selected tickers will move to the WEEKLY PICKS voting channels.\n"
-        "Vote for your favorite ticker before the categories fill up."
+        "Vote for your favorite ticker before the categories fill up.\n"
+        f"{NOT_INVESTMENT_ADVICE}"
     )
 
 
-def winner_role_dm(valid_until_label: str) -> str:
+def live_chosen_tickers_closed_for_voting(guild=None) -> str:
+    small = mention_vote(guild, "small")
+    mid = mention_vote(guild, "mid")
+    large = mention_vote(guild, "blue")
+    return (
+        "Voting is now open. This table is closed for the week.\n"
+        "Vote for this week's tickers in the WEEKLY PICKS channels:\n"
+        f"{small}\n"
+        f"{mid}\n"
+        f"{large}"
+    )
+
+
+def winner_incentive_lines(stats: dict | None = None) -> str:
+    streak = int((stats or {}).get("current_streak") or 1)
+    bonus = int((stats or {}).get("bonus_votes") or WINNER_BONUS_VOTES)
+    if streak >= 3:
+        badge = "💎"
+    elif streak >= 2:
+        badge = "🔥"
+    else:
+        badge = "🏆"
+    return (
+        f"Winner streak: {badge} **{streak}** week(s)\n"
+        f"Bonus: **+{bonus} extra vote** in each WEEKLY PICKS category next week."
+    )
+
+
+def winner_role_dm(
+    valid_until_label: str,
+    *,
+    stats: dict | None = None,
+) -> str:
     return (
         "CONGRATULATIONS!🎉 YOU WON THE WINNER ROLE🎉\n\n"
         f"Your WINNER role is valid for one week, starting now until next Friday ({valid_until_label}) at 4PM EST.\n\n"
+        f"{winner_incentive_lines(stats)}\n\n"
         "The WINNER role gives you the same perks as a PLAYER subscription:\n\n"
         "5 votes per week in each category in the WEEKLY PICKS channels (instead of 1)\n\n"
         "Access to subscriber-only channels:\n\n"
@@ -334,11 +384,12 @@ def winner_role_dm(valid_until_label: str) -> str:
     )
 
 
-def winner_role_removed_dm(player_mention: str) -> str:
+def winner_role_removed_dm(player_mention: str | None = None) -> str:
+    player = player_mention or mention_player(None)
     return (
         "WINNER ROLE REMOVED\n\n"
         "If you would like to continue enjoying the WINNER perks, you can participate "
-        f"in next week’s competition or click here > {player_mention} to purchase a subscription."
+        f"in next week’s competition or click here > {player} to purchase a subscription."
     )
 
 

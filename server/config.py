@@ -22,10 +22,10 @@ ROLE_ADMIN = os.getenv("ROLE_ADMIN", "ADMIN")
 _STYLE_TICKER = "\U0001d5b3\U0001d5a8\U0001d5a2\U0001d5aa\U0001d5a4\U0001d5b1"  # 𝖳𝖨𝖢𝖪𝖤𝖱
 _STYLE_LIVE = "\U0001d5ab\U0001d5a8\U0001d5b5\U0001d5a4"  # 𝖫𝖨𝖵𝖤
 
-CHANNEL_SMALL_TICKER = os.getenv("CHANNEL_SMALL_TICKER", f"📊small-cap-{_STYLE_TICKER}")
-CHANNEL_MID_TICKER = os.getenv("CHANNEL_MID_TICKER", f"📈mid-cap-{_STYLE_TICKER}")
-CHANNEL_BLUE_TICKER = os.getenv("CHANNEL_BLUE_TICKER", f"🏦large-cap-{_STYLE_TICKER}")
-CHANNEL_PICK_RESULTS = os.getenv("PICK_RESULTS_CHANNEL", "✅live-chosen-tickers")
+CHANNEL_SMALL_TICKER = os.getenv("CHANNEL_SMALL_TICKER", f"💠📊small-cap-{_STYLE_TICKER}")
+CHANNEL_MID_TICKER = os.getenv("CHANNEL_MID_TICKER", f"💠📈mid-cap-{_STYLE_TICKER}")
+CHANNEL_BLUE_TICKER = os.getenv("CHANNEL_BLUE_TICKER", f"💠🏦large-cap-{_STYLE_TICKER}")
+CHANNEL_PICK_RESULTS = os.getenv("PICK_RESULTS_CHANNEL", "💠✅live-chosen-tickers")
 PICK_RESULTS_CHANNEL_CANDIDATES = tuple(
     dict.fromkeys(
         n.strip()
@@ -37,13 +37,13 @@ PICK_RESULTS_CHANNEL_CANDIDATES = tuple(
     )
 )
 
-CHANNEL_SMALL_VOTE = os.getenv("CHANNEL_SMALL_VOTE", "🗳️small-cap")
-CHANNEL_MID_VOTE = os.getenv("CHANNEL_MID_VOTE", "🗳️mid-cap")
-CHANNEL_BLUE_VOTE = os.getenv("CHANNEL_BLUE_VOTE", "🗳️large-cap")
+CHANNEL_SMALL_VOTE = os.getenv("CHANNEL_SMALL_VOTE", "📢small-cap")
+CHANNEL_MID_VOTE = os.getenv("CHANNEL_MID_VOTE", "📢mid-cap")
+CHANNEL_BLUE_VOTE = os.getenv("CHANNEL_BLUE_VOTE", "📢large-cap")
 
-CHANNEL_SMALL_LIVE = os.getenv("CHANNEL_SMALL_LIVE", f"🔴small-cap-{_STYLE_LIVE}")
-CHANNEL_MID_LIVE = os.getenv("CHANNEL_MID_LIVE", f"🔴mid-cap-{_STYLE_LIVE}")
-CHANNEL_BLUE_LIVE = os.getenv("CHANNEL_BLUE_LIVE", f"🔴large-cap-{_STYLE_LIVE}")
+CHANNEL_SMALL_LIVE = os.getenv("CHANNEL_SMALL_LIVE", f"💠🔴small-cap-{_STYLE_LIVE}")
+CHANNEL_MID_LIVE = os.getenv("CHANNEL_MID_LIVE", f"💠🔴mid-cap-{_STYLE_LIVE}")
+CHANNEL_BLUE_LIVE = os.getenv("CHANNEL_BLUE_LIVE", f"💠🔴large-cap-{_STYLE_LIVE}")
 
 CHANNEL_MOD = "mod"
 CHANNEL_ADMIN_ACTIONS = "admin-actions"
@@ -65,40 +65,44 @@ NPC_GATE_EMOJIS = tuple(
     )
 )
 # Subscribe (new PLAYER checkout) — first matching channel name in guild wins
-CHANNEL_SUBSCRIBE = os.getenv("SUBSCRIBE_CHANNEL", "subscribe")
+_STYLE_PLAYER = "\U0001d40f\U0001d40b\U0001d400\U0001d418\U0001d404\U0001d411"  # 𝐏𝐋𝐀𝐘𝐄𝐑
+CHANNEL_SUBSCRIBE = os.getenv("SUBSCRIBE_CHANNEL", f"💎{_STYLE_PLAYER}💎")
 SUBSCRIBE_CHANNEL_CANDIDATES = tuple(
     dict.fromkeys(
         n.strip()
         for n in os.getenv(
             "SUBSCRIBE_CHANNEL_CANDIDATES",
-            "subscribe,player,registration,register,𝐏𝐋𝐀𝐘𝐄𝐑",
+            f"subscribe,player,registration,register,{_STYLE_PLAYER},💎{_STYLE_PLAYER}💎,{CHANNEL_SUBSCRIBE}",
         ).split(",")
         if n.strip()
     )
 )
 # Buy extra votes (one-time Stripe pack)
-CHANNEL_EXTRA_VOTES = os.getenv("EXTRA_VOTES_CHANNEL", "extra-votes")
+CHANNEL_EXTRA_VOTES = os.getenv("EXTRA_VOTES_CHANNEL", "💠extra-votes")
 EXTRA_VOTES_CHANNEL_CANDIDATES = tuple(
     dict.fromkeys(
         n.strip()
         for n in os.getenv(
             "EXTRA_VOTES_CHANNEL_CANDIDATES",
-            f"{CHANNEL_EXTRA_VOTES},buy-votes,extra-vote",
+            f"{CHANNEL_EXTRA_VOTES},extra-votes,buy-votes,extra-vote",
         ).split(",")
         if n.strip()
     )
 )
 # Public Q&A / FAQ
-CHANNEL_QA = os.getenv("QA_CHANNEL", "q-and-a")
+CHANNEL_QA = os.getenv("QA_CHANNEL", "ℚ＆𝗔")
 QA_CHANNEL_CANDIDATES = tuple(
     dict.fromkeys(
         n.strip()
-        for n in os.getenv("QA_CHANNEL_CANDIDATES", f"ℚ＆𝗔,{CHANNEL_QA},q-and-a,faq").split(",")
+        for n in os.getenv(
+            "QA_CHANNEL_CANDIDATES",
+            f"{CHANNEL_QA},ℚ＆𝗔,q-and-a,faq",
+        ).split(",")
         if n.strip()
     )
 )
 # Manage existing Stripe subscription (billing portal)
-CHANNEL_MANAGE_SUBSCRIPTION = os.getenv("MANAGE_SUBSCRIPTION_CHANNEL", "manage-subscription")
+CHANNEL_MANAGE_SUBSCRIPTION = os.getenv("MANAGE_SUBSCRIPTION_CHANNEL", "💠manage-subscription")
 MANAGE_SUBSCRIPTION_CHANNEL_CANDIDATES = tuple(
     dict.fromkeys(
         n.strip()

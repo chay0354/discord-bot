@@ -396,6 +396,11 @@ def clear_vote_runtime_state() -> None:
     for idx in range(3):
         _vote_counts[idx].clear()
         _user_votes[idx].clear()
+    for task in list(_leaderboard_update_tasks.values()):
+        task.cancel()
+    _leaderboard_update_tasks.clear()
+    _live_msg_ids.clear()
+    _voting_open_msg_ids.clear()
 
 
 def hydrate_vote_state(guild_id: int, week_key: str | None = None) -> None:
@@ -564,11 +569,19 @@ def _schedule_leaderboard_update(guild: discord.Guild, cat: int) -> None:
     _leaderboard_update_tasks[key] = asyncio.create_task(_run())
 
 
-async def _post_or_update_leaderboard(guild: discord.Guild, cat: int) -> None:
-    """Post or edit the live leaderboard in the corresponding -live channel."""
+async def _post_or_update_leaderboard(
+    guild: discord.Guild, cat: int, *, force: bool = False
+) -> None:
+    """Post or edit the live leaderboard in the corresponding -live channel.
+
+    When voting is closed this is a no-op so a delayed vote refresh cannot
+    overwrite ``CHANNEL CURRENTLY CLOSED``.
+    """
     ch_name = _category_idx_to_live_name(cat)
     ch = _find_text_channel(guild, ch_name)
     if not ch:
+        return
+    if not force and not database.is_voting_open(guild.id):
         return
     week_key = database.voting_week_key_for_guild(guild.id)
     pairs = database.vote_counts(guild.id, week_key, ["small", "mid", "blue"][cat])
@@ -593,11 +606,15 @@ async def _post_or_update_leaderboard(guild: discord.Guild, cat: int) -> None:
             pass  # fall through to send new
 
     # try find latest bot message with matching title
+    live_title = _category_title(cat).upper()
     try:
         async for msg in ch.history(limit=20):
             if msg.author == guild.me and msg.embeds:
                 e = msg.embeds[0]
-                if (e.title or "").startswith("🏆 LIVE LEADERBOARD —"):
+                title = (e.title or "").strip()
+                if title.upper() == "CHANNEL CURRENTLY CLOSED":
+                    continue
+                if title.upper() == live_title or title.startswith("🏆 LIVE LEADERBOARD —"):
                     await msg.edit(embed=emb)
                     _live_msg_ids[cat] = msg.id
                     await asyncio.to_thread(
@@ -680,6 +697,44 @@ def _vote_button_label(symbol: str, quote: FinnhubQuote | None) -> str:
     if quote and quote.current_price is not None:
         return f"${sym} @ ${quote.current_price:.2f}"[:80]
     return f"${sym}"[:80]
+
+
+def _exhausted_vote_view(tickers: List[str]) -> discord.ui.View:
+    """Per-user gray buttons. Discord cannot disable the shared channel buttons
+    for one member only, so we send this ephemeral copy after they hit the limit.
+    """
+    view = discord.ui.View(timeout=120)
+    for i, ticker in enumerate(tickers[:25]):
+        view.add_item(
+            discord.ui.Button(
+                label=f"${ticker}"[:80],
+                style=discord.ButtonStyle.secondary,
+                disabled=True,
+                row=i // 5,
+            )
+        )
+    return view
+
+
+async def _send_vote_limit(
+    interaction: discord.Interaction,
+    *,
+    cat: int,
+    is_npc: bool,
+    tickers: List[str],
+    prefix: str = "",
+) -> None:
+    # NPC subscribe line already lives under YOU PICKED when this is the last vote.
+    body = game_copy.vote_limit_message(
+        cat, is_npc=is_npc and not prefix, guild=interaction.guild
+    )
+    if prefix:
+        body = f"{prefix}\n\n{body}"
+    await interaction.followup.send(
+        body,
+        view=_exhausted_vote_view(tickers),
+        ephemeral=True,
+    )
 
 
 class WeeklyVotingView(discord.ui.View):
@@ -917,13 +972,11 @@ class WeeklyVotingView(discord.ui.View):
         mem_count = len(user_list)
 
         if mem_count >= limit:
-            await interaction.followup.send(
-                game_copy.vote_limit_message(
-                    cat,
-                    is_npc=role_at_vote == "NPC",
-                    guild=guild,
-                ),
-                ephemeral=True,
+            await _send_vote_limit(
+                interaction,
+                cat=cat,
+                is_npc=role_at_vote == "NPC",
+                tickers=self.tickers,
             )
             return
 
@@ -946,6 +999,14 @@ class WeeklyVotingView(discord.ui.View):
             role_at_vote=role_at_vote,
         )
         if not ok:
+            if err_msg.startswith("You Have Reached Your Voting Limit"):
+                await _send_vote_limit(
+                    interaction,
+                    cat=save_cat,
+                    is_npc=role_at_vote == "NPC",
+                    tickers=self.tickers,
+                )
+                return
             await interaction.followup.send(err_msg, ephemeral=True)
             return
 
@@ -954,10 +1015,25 @@ class WeeklyVotingView(discord.ui.View):
         new_count = len(_ensure_user_slot(save_cat, member.id))
         on_ticker = _ensure_user_slot(save_cat, member.id).count(ticker)
 
-        await interaction.followup.send(
-            _vote_confirmation_message(ticker, save_cat, new_count, limit, on_ticker, guild=guild),
-            ephemeral=True,
+        confirm = _vote_confirmation_message(
+            ticker,
+            save_cat,
+            new_count,
+            limit,
+            on_ticker,
+            guild=guild,
+            is_npc=role_at_vote == "NPC",
         )
+        if new_count >= limit:
+            await _send_vote_limit(
+                interaction,
+                cat=save_cat,
+                is_npc=role_at_vote == "NPC",
+                tickers=self.tickers,
+                prefix=confirm,
+            )
+            return
+        await interaction.followup.send(confirm, ephemeral=True)
 
 
 async def build_weekly_voting_view(
@@ -1062,8 +1138,12 @@ def _vote_confirmation_message(
     limit: int,
     on_ticker: int = 1,
     guild: discord.Guild | None = None,
+    *,
+    is_npc: bool = False,
 ) -> str:
-    return game_copy.vote_picked_line(ticker, cat, count, limit, guild=guild)
+    return game_copy.vote_picked_line(
+        ticker, cat, count, limit, guild=guild, is_npc=is_npc
+    )
 
 
 def _banner_description_with_timer(
@@ -1170,6 +1250,24 @@ async def _get_or_cache_voting_open_message(guild: discord.Guild, cat: int) -> O
     return None
 
 
+async def refresh_voting_open_banners(
+    guild: discord.Guild,
+    end_utc: datetime | None = None,
+) -> int:
+    """Rewrite VOTING OPEN banners after the 24h window closes (or any timer change)."""
+    updated = 0
+    for cat in range(3):
+        msg = await _get_or_cache_voting_open_message(guild, cat)
+        if msg is None:
+            continue
+        try:
+            await msg.edit(embed=_build_voting_open_embed(cat, end_utc, guild=guild))
+            updated += 1
+        except Exception as exc:
+            print(f"[weekly_picks] banner refresh failed cat={cat} guild={guild.id}: {exc!r}", flush=True)
+    return updated
+
+
 # ===================== Cog =====================
 
 class WeeklyPicksCog(commands.Cog):
@@ -1181,6 +1279,37 @@ class WeeklyPicksCog(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self) -> None:
         await self._recover_state_after_restart()
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        """Re-post VOTING OPEN if a user/report flow removed the banner."""
+        if payload.guild_id is None:
+            return
+        cached = _voting_open_msg_ids.get(payload.guild_id) or {}
+        cat = next((c for c, mid in cached.items() if mid == payload.message_id), None)
+        if cat is None:
+            return
+        guild = self.bot.get_guild(payload.guild_id)
+        if guild is None or not database.is_voting_open(guild.id):
+            return
+        _voting_open_msg_ids.setdefault(guild.id, {}).pop(cat, None)
+        ch = _find_text_channel(guild, _category_idx_to_weekly_name(cat))
+        if ch is None:
+            return
+        cycle = database.ensure_cycle(guild.id, database.voting_week_key_for_guild(guild.id))
+        end_utc = None
+        raw = cycle.get("early_window_end_at")
+        if raw:
+            try:
+                end_utc = datetime.fromisoformat(str(raw))
+            except Exception:
+                end_utc = None
+        try:
+            sent = await ch.send(embed=_build_voting_open_embed(cat, end_utc, guild=guild))
+            _voting_open_msg_ids.setdefault(guild.id, {})[cat] = sent.id
+            _persist_message_state(guild.id, _message_state_key("voting_open", cat), ch.id, sent.id)
+        except Exception as exc:
+            print(f"[weekly_picks] restore VOTING OPEN failed: {exc!r}", flush=True)
 
     async def _recover_state_after_restart(self) -> None:
         """Rebuild in-memory state from the database so a restart/crash never
@@ -1485,16 +1614,22 @@ class WeeklyPicksCog(commands.Cog):
                 continue
             deleted = await _delete_bot_messages(ch, guild, limit=200)
             try:
-                await _post_or_update_leaderboard(guild, cat)
+                await ch.send(
+                    embed=discord.Embed(
+                        title="CHANNEL CURRENTLY CLOSED",
+                        description=game_copy.live_channel_closed_description(cat),
+                        color=discord.Color.dark_grey(),
+                    )
+                )
             except Exception:
                 pass
             summary_lines.append(
-                f"• #{live_name}: cleared {deleted} and reset leaderboard")
+                f"• #{live_name}: cleared {deleted} and posted CHANNEL CURRENTLY CLOSED")
 
         # 3) PICK RESULTS: reset all three fields to 0/20
         await _reset_pick_results(guild)
         summary_lines.append(
-            "• #pick-results: reset to (0/20) for all categories")
+            "• #live-chosen-tickers: reset to (0/20) for all categories")
 
         # 4) TICKER CHANNELS: clear bot messages and post CHOOSE TICKER embed+view
         for idx, name in enumerate(TICKER_CHANNELS):

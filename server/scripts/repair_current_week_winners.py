@@ -21,6 +21,7 @@ from discord.ext import commands
 import database
 from cogs.scheduler import SchedulerCog, winner_award_filter_sets
 from config import ROLE_WINNER
+from discord_names import member_role_keys
 
 
 class WinnerRepairBot(commands.Bot):
@@ -48,7 +49,9 @@ class WinnerRepairBot(commands.Bot):
         expires_at_utc = datetime.now(timezone.utc) + timedelta(days=7)
         expires_at = expires_at_utc.isoformat()
         week_start_iso = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        blocking_roles = {"PLAYER", "ADMIN", "WINNER"}
         for guild in self.guilds:
+            await scheduler._expire_winners(guild, end_eligibility_week=True)
             member_ids, player_or_paid = await winner_award_filter_sets(
                 guild, week_start_iso=week_start_iso
             )
@@ -60,11 +63,18 @@ class WinnerRepairBot(commands.Bot):
             )
             winner_role = discord.utils.get(guild.roles, name=ROLE_WINNER)
             print(f"{guild.name}: eligible winners for {week_key}: {winners}", flush=True)
+            awarded: list[int] = []
             for user_id in winners:
                 member = guild.get_member(user_id)
                 if not member:
+                    print(f"skip {user_id}: not in guild", flush=True)
+                    continue
+                held = member_role_keys(member) & blocking_roles
+                if held:
+                    print(f"skip {user_id}: holds {'/'.join(sorted(held))}", flush=True)
                     continue
                 database.add_winner(guild.id, week_key, user_id, expires_at)
+                awarded.append(user_id)
                 if winner_role:
                     if winner_role not in member.roles:
                         try:
@@ -74,7 +84,7 @@ class WinnerRepairBot(commands.Bot):
             await scheduler._publish_last_game_winners(
                 guild,
                 week_key=week_key,
-                winner_ids=winners,
+                winner_ids=awarded,
                 valid_until_utc=expires_at_utc,
             )
         await self.close()

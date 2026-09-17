@@ -5,8 +5,14 @@ import discord
 from discord.ext import commands
 
 import database
+import game_copy
 from config import CHANNEL_QA, QA_CHANNEL_CANDIDATES, ROLE_ADMIN
-from discord_names import deny_pin_and_slowmode, find_game_role, find_text_channel
+from discord_names import (
+    deny_pin_and_slowmode,
+    ensure_styled_roles,
+    find_game_role,
+    find_text_channel,
+)
 
 _QA_STATE_KEY = "qa_items"
 
@@ -31,17 +37,11 @@ _DEFAULT_ITEMS: list[dict[str, str]] = [
 
 
 def _find_channel(guild: discord.Guild, names: tuple[str, ...]) -> discord.TextChannel | None:
-    me = guild.me
-    for name in names:
-        ch = find_text_channel(guild, name)
-        if ch is None:
-            continue
-        if me is None:
-            return ch
-        perms = ch.permissions_for(me)
-        if perms.view_channel and perms.send_messages and perms.read_message_history:
-            return ch
-    return None
+    """Prefer the styled top-of-server Q&A channel even if perms still need a sync."""
+    preferred = find_text_channel(guild, CHANNEL_QA)
+    if preferred is not None:
+        return preferred
+    return find_text_channel(guild, *names)
 
 
 def _load_items(guild_id: int) -> list[dict[str, str]]:
@@ -107,7 +107,8 @@ def qa_embed(items: list[dict[str, str]]) -> discord.Embed:
             "Press a button below to **open** that answer (only you see it). "
             "Press again anytime to read it again.\n\n"
             + "\n".join(lines)
-            + "\n\n*Only admins can add or change these questions.*"
+            + "\n\n*Only admins can add or change these questions.*\n"
+            + game_copy.NOT_INVESTMENT_ADVICE
         ),
         color=discord.Color.blurple(),
     )
@@ -126,12 +127,13 @@ class QAChannelCog(commands.Cog):
                 print(f"[qa] setup failed for {guild.id}: {exc!r}", flush=True)
 
     async def _ensure_channel(self, guild: discord.Guild) -> discord.TextChannel:
+        await ensure_styled_roles(guild)
         ch = _find_channel(guild, QA_CHANNEL_CANDIDATES)
         everyone = guild.default_role
         me = guild.me
         no_pin = deny_pin_and_slowmode()
         overwrites: dict[discord.Role | discord.Member, discord.PermissionOverwrite] = {
-            everyone: discord.PermissionOverwrite(view_channel=False, send_messages=False, **no_pin),
+            everyone: discord.PermissionOverwrite(view_channel=True, send_messages=False, **no_pin),
         }
         for key in ("NPC", "PLAYER", "WINNER", "ADMIN"):
             role = find_game_role(guild, key)
@@ -146,31 +148,39 @@ class QAChannelCog(commands.Cog):
             overwrites[me] = discord.PermissionOverwrite(
                 view_channel=True, send_messages=True, manage_messages=True
             )
+        parent = next(
+            (c for c in guild.categories if c.name.upper() == "STARTING"),
+            None,
+        )
         if not ch:
-            parent = next(
-                (c for c in guild.categories if c.name.upper() == "STARTING"),
-                None,
-            )
             ch = await guild.create_text_channel(
-                "q-and-a",
+                CHANNEL_QA,
                 overwrites=overwrites,
                 category=parent,
                 reason="Q&A channel the bot can manage",
             )
         else:
+            edits: dict = {"overwrites": overwrites}
+            if ch.name != CHANNEL_QA:
+                edits["name"] = CHANNEL_QA
             try:
-                await ch.edit(overwrites=overwrites, reason="Q&A permission sync")
+                await ch.edit(**edits, reason="Q&A permission sync")
             except (discord.Forbidden, discord.HTTPException):
                 pass
         items = _load_items(guild.id)
-        posted = False
+        posted = None
         async for msg in ch.history(limit=15):
             if msg.author == guild.me and msg.embeds and (msg.embeds[0].title or "") == "Q&A":
                 await msg.edit(embed=qa_embed(items), view=QAView(items))
-                posted = True
+                posted = msg
                 break
-        if not posted:
-            await ch.send(embed=qa_embed(items), view=QAView(items))
+        if posted is None:
+            posted = await ch.send(embed=qa_embed(items), view=QAView(items))
+        if not posted.pinned:
+            try:
+                await posted.pin(reason="Keep Q&A at the top of ℚ＆𝗔")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
         return ch
 
     @commands.command(name="qa_set")

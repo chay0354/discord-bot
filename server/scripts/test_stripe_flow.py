@@ -310,6 +310,14 @@ async def main() -> int:
     check("PLAYER role retained", guild.player_role in member_a.roles)
     check("renewal email sent", any("renewed" in s.lower() for _, s in notify_emails[emails_before:]), str(notify_emails))
 
+    # ---- Scenario 3b: invoice.paid is treated as payment_succeeded ------
+    print("\nScenario 3b: invoice.paid aliases invoice.payment_succeeded")
+    res_paid = await cog.process_stripe_webhook_payload(
+        evt("evt_2b", "invoice.paid", invoice(True, A, "cus_A", "sub_A"))
+    )
+    check("invoice.paid accepted", res_paid.get("type") == "invoice.payment_succeeded", str(res_paid))
+    check("still active after invoice.paid", db.subs[A]["status"] == "active")
+
     # ---- Scenario 4: payment failure removes role -----------------------
     print("\nScenario 4: invoice.payment_failed removes PLAYER + alerts user")
     await cog.process_stripe_webhook_payload(
@@ -371,6 +379,7 @@ async def main() -> int:
         evt("evt_9", "customer.subscription.updated", subscription_obj(None, "cus_UNKNOWN", "sub_X", status="active"))
     )
     check("unmapped returns no discord_id", res9.get("discord_id") is None, str(res9))
+    check("unmapped is not marked processed", db.events["evt_9"].get("processed") is not True)
 
     print("\n" + ("=" * 52))
     if failures:

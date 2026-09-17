@@ -432,3 +432,15 @@ def get_subscriptions(limit: int = 100) -> list[dict[str, Any]]:
         "subscriptions",
         f"?select=*&order=updated_at.desc&limit={limit}",
     )
+
+
+def get_users(limit: int = 200) -> list[dict[str, Any]]:
+    return database.list_users(limit=limit)
+
+
+def export_backup() -> dict[str, Any]:
+    try:
+        gid = _guild_id()
+    except Exception:
+        gid = None
+    return database.export_game_backup(gid)

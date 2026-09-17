@@ -60,6 +60,7 @@ from cogs.weekly_picks import (
     # Voting banner builder (includes live Discord relative timestamp)
     # and the canonical end-of-window calculator
     _build_voting_open_embed,
+    refresh_voting_open_banners,
     _message_state_key,
     _persist_message_state,
     early_window_end_utc,
@@ -73,7 +74,7 @@ from cogs.submission_ui import (
     _extract_lists_from_pick_results,
     _closed_banner_embed,
     _clear_pick_results_message,
-    sync_pick_results_from_db,
+    close_pick_results_for_voting,
     reset_picker_runtime_state,
 )
 import game_copy
@@ -254,8 +255,11 @@ def _timer_lines(end_utc: datetime) -> str:
     return f"**Early Winners Window ends:** {_format_et(end_utc)} — <t:{unix}:F> • <t:{unix}:R>"
 
 
-def _winner_role_dm(valid_until_utc: datetime) -> str:
-    return game_copy.winner_role_dm(game_copy.friday_et_label(valid_until_utc))
+def _winner_role_dm(valid_until_utc: datetime, *, stats: dict | None = None) -> str:
+    return game_copy.winner_role_dm(
+        game_copy.friday_et_label(valid_until_utc),
+        stats=stats,
+    )
 
 
 def _winner_role_removed_dm(player_mention: str) -> str:
@@ -373,9 +377,10 @@ async def winner_award_filter_sets(
     member cache is complete; otherwise a still-present winner could be missing
     from the cache and wrongly excluded.
 
-    The blocked set excludes anyone who is a PLAYER / active subscriber **now**,
-    *or* who gained PLAYER access at any point during the week — so an NPC who
-    became a PLAYER mid-week (even if they reverted to NPC) cannot win.
+    The blocked set excludes anyone who is a PLAYER / WINNER / ADMIN **now**,
+    an active subscriber, *or* who gained PLAYER access at any point during
+    the week — so an NPC who became a PLAYER mid-week (even if they reverted
+    to NPC) cannot win.
     """
     if not guild.chunked:
         try:
@@ -385,7 +390,8 @@ async def winner_award_filter_sets(
     member_ids = {m.id for m in guild.members}
     player_or_paid: set[int] = set()
     for member in guild.members:
-        if _role_snapshot(member) == "PLAYER":
+        snap = _role_snapshot(member)
+        if snap in {"PLAYER", "WINNER", "ADMIN"}:
             player_or_paid.add(member.id)
         elif database.is_paid_member(member.id):
             player_or_paid.add(member.id)
@@ -393,7 +399,7 @@ async def winner_award_filter_sets(
     if week_start_iso:
         try:
             player_or_paid |= await asyncio.to_thread(
-                database.player_grant_user_ids_since, week_start_iso
+                database.player_grant_user_ids_since, week_start_iso, guild.id
             )
         except Exception as exc:  # noqa: BLE001
             print(f"[scheduler] player_grant lookup failed for {guild.id}: {exc!r}", flush=True)
@@ -705,15 +711,15 @@ class SchedulerCog(commands.Cog):
             f"{leaderboards_ok}/3 channels",
         )
 
-        # 4) Publish this week's ballot on the PICK RESULTS board (weekend pre-vote selections).
+        # 4) Remove the weekend ticker table and point users to WEEKLY PICKS.
         try:
-            synced = await sync_pick_results_from_db(guild)
-            if synced:
-                rpt.ok("live-chosen-tickers board shows this week's ballot", "synced from ticker_picks")
+            closed = await close_pick_results_for_voting(guild)
+            if closed:
+                rpt.ok("live-chosen-tickers table closed for voting", "vote in WEEKLY PICKS")
             else:
-                rpt.info("live-chosen-tickers board shows this week's ballot", "no board found")
+                rpt.info("live-chosen-tickers table closed for voting", "no board found")
         except Exception as exc:
-            rpt.fail("live-chosen-tickers board shows this week's ballot", repr(exc))
+            rpt.fail("live-chosen-tickers table closed for voting", repr(exc))
 
         # 5) Close CHOOSE YOUR TICKER channels visually.
         ticker_map = {
@@ -798,6 +804,18 @@ class SchedulerCog(commands.Cog):
             early_window_open=False,
         )
         disarm_early_window()
+        end_utc = _now_utc()
+        cycle = database.ensure_cycle(guild.id, week_key)
+        raw_end = cycle.get("early_window_end_at")
+        if raw_end:
+            try:
+                end_utc = datetime.fromisoformat(str(raw_end))
+            except Exception:
+                pass
+        try:
+            await refresh_voting_open_banners(guild, end_utc)
+        except Exception as exc:
+            print(f"[scheduler] early-close banner refresh failed: {exc!r}", flush=True)
         await self._announce_mod(
             guild,
             "Early Winner Window Closed",
@@ -909,13 +927,23 @@ class SchedulerCog(commands.Cog):
                 await _purge_channel_messages(ch, guild, limit=500)
                 await ch.send(embed=stopped)
 
-        for name in (CHANNEL_SMALL_LIVE, CHANNEL_MID_LIVE, CHANNEL_BLUE_LIVE):
+        for name, cat_key in (
+            (CHANNEL_SMALL_LIVE, "small"),
+            (CHANNEL_MID_LIVE, "mid"),
+            (CHANNEL_BLUE_LIVE, "blue"),
+        ):
             ch = _find_text_channel(guild, name)
-            if ch:
-                await _purge_channel_messages(ch, guild, limit=500)
-        for cat in range(3):
+            if not ch:
+                continue
+            await _purge_channel_messages(ch, guild, limit=500)
             try:
-                await _post_or_update_leaderboard(guild, cat)
+                await ch.send(
+                    embed=discord.Embed(
+                        title="CHANNEL CURRENTLY CLOSED",
+                        description=game_copy.live_channel_closed_description(cat_key),
+                        color=discord.Color.dark_grey(),
+                    )
+                )
             except Exception:
                 pass
 
@@ -1049,13 +1077,30 @@ class SchedulerCog(commands.Cog):
                 )
         return removed
 
-    async def _expire_winners(self, guild: discord.Guild) -> int:
+    async def _expire_winners(
+        self, guild: discord.Guild, *, end_eligibility_week: bool = False
+    ) -> int:
+        """Remove WINNER roles whose grant has ended.
+
+        ``end_eligibility_week=True`` (Friday close / simulation) also ends
+        every still-active grant from the previous week, so testers and the
+        live Friday 16:00 job both drop last week's winners before awarding
+        new ones. Hourly / startup expiry keeps the time-based path only.
+        """
         role = find_game_role(guild, "WINNER")
         if not role:
             return 0
         player_mention = _player_channel_mention(guild)
+        rows = list(database.expired_winner_grants(guild.id))
+        if end_eligibility_week:
+            seen = {int(row["id"]) for row in rows if row.get("id") is not None}
+            for row in database.active_winner_grants(guild.id):
+                row_id = row.get("id")
+                if row_id is None or int(row_id) in seen:
+                    continue
+                rows.append(row)
         removed = 0
-        for row in database.expired_winner_grants(guild.id):
+        for row in rows:
             user_id = int(row["user_id"])
             member = guild.get_member(user_id)
             if member and role in member.roles:
@@ -1156,32 +1201,28 @@ class SchedulerCog(commands.Cog):
         valid_until_utc: datetime,
         winning_tickers: dict | None = None,
         guild_id: int | None = None,
+        closed_at_utc: datetime | None = None,
     ) -> discord.Embed:
         badge = "🏆"
+        payload: dict = {}
         if guild_id:
             try:
                 row = database.get_message_state(
                     guild_id, database.winner_stats_state_key(user_id)
                 )
-                badge = database.winner_incentive_badge((row or {}).get("payload"))
+                payload = (row or {}).get("payload") or {}
+                badge = database.winner_incentive_badge(payload)
             except Exception:
                 badge = "🏆"
-        picks = winning_tickers or {}
-        pick_lines = []
-        for cat in ("small", "mid", "blue"):
-            tickers = picks.get(cat) or []
-            title = CATEGORY_TITLES.get(cat, cat)
-            pick_lines.append(
-                f"• {title}: {', '.join(f'${t}' for t in tickers) if tickers else '—'}"
-            )
+                payload = {}
+        when = closed_at_utc or valid_until_utc
         return discord.Embed(
-            title=f"{badge} WINNER",
+            title=f"{badge} CONGRATULATIONS",
             description=(
                 f"{badge} <@{user_id}>\n\n"
-                "Won by voting the top ticker in every category as NPC "
-                "inside the first 24 hours.\n\n"
-                + "\n".join(pick_lines)
-                + f"\n\n**WINNER role** valid until **{game_copy.friday_et_label(valid_until_utc)} at 4PM EST**."
+                f"Date: **{game_copy.friday_et_label(when)}**\n\n"
+                "Received the WINNER role.\n\n"
+                f"{game_copy.winner_incentive_lines(payload)}"
             ),
             color=discord.Color.gold(),
         )
@@ -1241,6 +1282,7 @@ class SchedulerCog(commands.Cog):
                             valid_until_utc=valid_until_utc,
                             winning_tickers=winning_tickers,
                             guild_id=guild.id,
+                            closed_at_utc=closed_at_utc,
                         )
                     )
             else:
@@ -1406,12 +1448,13 @@ class SchedulerCog(commands.Cog):
         else:
             rpt.fail("Leaderboard tables were posted successfully", "leaderboard channel not found")
 
-        # 4) Expire any WINNER grants whose week ended.
+        # 4) End last week's eligibility: drop every current WINNER grant
+        # (time-expired *and* still-active) before awarding this week's winners.
         try:
-            expired = await self._expire_winners(guild)
-            rpt.ok("Expired WINNER roles removed", f"{expired} member(s)")
+            expired = await self._expire_winners(guild, end_eligibility_week=True)
+            rpt.ok("WINNER roles from the previous week were removed", f"{expired} member(s)")
         except Exception as exc:
-            rpt.fail("Expired WINNER roles removed", repr(exc))
+            rpt.fail("WINNER roles from the previous week were removed", repr(exc))
 
         # 5) Compute eligible winners (NPC + early-window only) and persist.
         week_start_iso = (now_utc - timedelta(days=7)).isoformat()
@@ -1481,8 +1524,11 @@ class SchedulerCog(commands.Cog):
                 print(f"[scheduler] winner incentive failed for {user_id}: {exc!r}", flush=True)
 
         # 6) Announce winners (only the validated list that will be awarded).
+        # Validity ends at the next Friday 4 PM ET — matches the DM copy and
+        # the automatic Friday-close expiry, not "now + 7 days" which can
+        # overshoot Friday 16:00 by a few seconds and skip removal.
+        expires_at_utc = _next_weekday_time_et(now_utc, 4, 16, 0)
         try:
-            expires_at_utc = now_utc + timedelta(days=7)
             await self._publish_last_game_winners(
                 guild,
                 week_key=week_key,
@@ -1501,7 +1547,7 @@ class SchedulerCog(commands.Cog):
             rpt.fail("Winners were announced successfully", repr(exc))
 
         # 7) Grant WINNER roles to the same validated list.
-        expires_at = (now_utc + timedelta(days=7)).isoformat()
+        expires_at = expires_at_utc.isoformat()
         granted = 0
         grant_errors = 0
         dm_sent = 0
@@ -1565,7 +1611,15 @@ class SchedulerCog(commands.Cog):
                 # Send the winner DM only to a member who is in the server (already
                 # confirmed above). A blocked/closed-DM failure is logged, not fatal.
                 try:
-                    await member.send(_winner_role_dm(now_utc + timedelta(days=7)))
+                    stats_row = database.get_message_state(
+                        guild.id, database.winner_stats_state_key(user_id)
+                    )
+                    await member.send(
+                        _winner_role_dm(
+                            expires_at_utc,
+                            stats=(stats_row or {}).get("payload"),
+                        )
+                    )
                     dm_sent += 1
                     database.log_event(
                         guild.id,
@@ -1638,9 +1692,14 @@ class SchedulerCog(commands.Cog):
             f"{live_closed}/{len(live_names)} channels",
         )
 
-        # 9) Reopen CHOOSE YOUR TICKER channels for next week.
+        # 9) Reopen CHOOSE YOUR TICKER channels for NEXT week — never the week
+        # we just closed (a mid-week simulation used to reset this week's data
+        # and overwrite VOTING CLOSED).
         try:
-            reopen = await self._reopen_ticker_channels(guild)
+            selection_week = database.ticker_selection_week_key_for(now_utc)
+            if selection_week == week_key:
+                selection_week = database.next_week_key_for(now_utc)
+            reopen = await self._reopen_ticker_channels(guild, selection_week_key=selection_week)
             rpt.check(
                 "CHOOSE YOUR TICKER channels were reopened successfully",
                 reopen["reopened"] == reopen["total"],
@@ -1669,7 +1728,7 @@ class SchedulerCog(commands.Cog):
             rpt.fail("live-chosen-tickers reopened and previous closed message cleared", repr(exc))
 
         # 11) PLAYER roles added during the week (best-effort stat).
-        player_added = database.count_player_grants_since(week_start_iso)
+        player_added = database.count_player_grants_since(week_start_iso, guild.id)
         rpt.ok(f"PLAYER roles were added to {player_added} users during the week")
 
         database.log_event(

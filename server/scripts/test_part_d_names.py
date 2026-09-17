@@ -33,6 +33,8 @@ def main() -> int:
     check(names_match(CHANNEL_SMALL_TICKER, "small-cap-ticker"), "small ticker alias")
     check(names_match(CHANNEL_SMALL_LIVE, "small-cap-live"), "small live alias")
     check(names_match(CHANNEL_SMALL_VOTE, "small-cap"), "small vote alias")
+    check(names_match("📢small-cap", "🗳️small-cap"), "megaphone vote still matches ballot")
+    check(names_match("💠📊small-cap-𝖳𝖨𝖢𝖪𝖤𝖱", "small-cap-ticker"), "diamond ticker prefix folds")
     check(names_match("pick-results", "pick-results"), "old pick-results still matches itself")
     check(not names_match(CHANNEL_PICK_RESULTS, "pick-results"), "new pick-results name is distinct")
     check("livechosentickers" in normalize_discord_name(CHANNEL_PICK_RESULTS), "live-chosen-tickers canonical")

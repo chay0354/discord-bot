@@ -115,6 +115,15 @@ def main() -> int:
     if '"no eligible winners"' not in friday and "no eligible winners" not in friday:
         fails.append("friday close must explain no-winner weeks")
 
+    if "count_player_grants_since(week_start_iso, guild.id)" not in friday:
+        fails.append("Friday #mod PLAYER-roles line must count grants for this guild")
+    if "refresh_voting_open_banners" not in early:
+        fails.append("Tuesday early close must refresh VOTING OPEN banners")
+    if "apply_deny_pin_to_game_channels" not in (ROOT / "discord_names.py").read_text(encoding="utf-8"):
+        fails.append("PIN / bypass slowmode must be forced off on game channels")
+    if "_backfill_gate_reactors" not in (ROOT / "cogs" / "onboarding.py").read_text(encoding="utf-8"):
+        fails.append("RULES gate must backfill NPC for existing reactors")
+
     print("SECTION 13 — ADMIN REPORTS, LOGS & #mod")
     print("=" * 50)
     if fails:

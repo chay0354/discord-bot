@@ -17,7 +17,7 @@ _SESSION.headers.update({
 })
 
 # NASDAQ/NYSE allowlist (Yahoo returns several codes/labels)
-_ALLOWED_EX_CODES = {"NMS", "NCM", "NGM", "NYQ"}  # Nasdaq/NYSE families
+_ALLOWED_EX_CODES = {"NMS", "NCM", "NGM", "NYQ", "ASE", "NYS"}  # Nasdaq/NYSE families
 # in exchDisp/fullExchangeName
 _ALLOWED_EX_TEXT = ("NASDAQ", "NYSE")
 

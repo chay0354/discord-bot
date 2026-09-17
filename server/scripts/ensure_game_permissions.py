@@ -39,6 +39,7 @@ from config import (
     CHANNEL_SUBSCRIBE,
     CHANNEL_WINNERS,
     EXTRA_VOTES_CHANNEL_CANDIDATES,
+    MANAGE_SUBSCRIPTION_CHANNEL_CANDIDATES,
     PICK_RESULTS_CHANNEL_CANDIDATES,
     QA_CHANNEL_CANDIDATES,
     ROLE_ADMIN,
@@ -269,9 +270,9 @@ class PermissionEnsurer(discord.Client):
                 (CHANNEL_ADMIN_ACTIONS, mod_overwrites(), (), False),
                 (CHANNEL_FINAL_LEADERBOARD, public_overwrites(), (), False),
                 (CHANNEL_WINNERS, public_overwrites(), (), False),
-                (CHANNEL_MANAGE_SUBSCRIPTION, public_overwrites(), (), False),
-                (CHANNEL_QA, public_overwrites(), QA_CHANNEL_CANDIDATES, False),
-                (CHANNEL_EXTRA_VOTES, subscriber_overwrites(), EXTRA_VOTES_CHANNEL_CANDIDATES, False),
+                (CHANNEL_MANAGE_SUBSCRIPTION, public_overwrites(), MANAGE_SUBSCRIPTION_CHANNEL_CANDIDATES, True),
+                (CHANNEL_QA, public_overwrites(), QA_CHANNEL_CANDIDATES, True),
+                (CHANNEL_EXTRA_VOTES, subscriber_overwrites(), EXTRA_VOTES_CHANNEL_CANDIDATES, True),
                 (CHANNEL_RULES, rules_overwrites(), RULES_CHANNEL_CANDIDATES, False),
             ]
             for name, overwrites, aliases, rename in channel_specs:
@@ -282,7 +283,7 @@ class PermissionEnsurer(discord.Client):
                 CHANNEL_SUBSCRIBE,
                 subscribe_funnel_overwrites(),
                 *SUBSCRIBE_CHANNEL_CANDIDATES,
-                rename=False,
+                rename=True,
             )
 
 

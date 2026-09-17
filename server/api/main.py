@@ -13,12 +13,14 @@ from pydantic import BaseModel
 import app_state
 from api.auth import require_admin_key
 from game_control import (
+    export_backup,
     get_audit_logs,
     get_game_history,
     get_game_status,
     get_leaderboards,
     get_subscriptions,
     get_tickers,
+    get_users,
     get_votes,
     run_action,
 )
@@ -55,13 +57,17 @@ def health() -> dict[str, str]:
 
 @app.post("/stripe/webhook")
 async def stripe_webhook(request: Request) -> dict[str, bool]:
-    """Stripe endpoint when CRM API shares Railway PORT (no second listener)."""
+    """Stripe endpoint when CRM API shares Railway PORT (no second listener).
+
+    Process even if Discord ``on_ready`` has not fired yet: the subscription is
+    written to the DB immediately, and PLAYER is granted on the next reconcile
+    (or as soon as the member cache is available). Returning 503 here was the
+    demo failure mode — Stripe retried during deploy and the user stayed NPC.
+    """
     from cogs.billing import BillingCog
 
     bot = app_state.bot
-    if not bot or not app_state.bot_ready:
-        raise HTTPException(status_code=503, detail="Discord bot is not ready")
-    cog = bot.get_cog("BillingCog")
+    cog = bot.get_cog("BillingCog") if bot else None
     if not isinstance(cog, BillingCog):
         raise HTTPException(status_code=503, detail="Billing cog is not loaded")
     try:
@@ -136,6 +142,22 @@ def game_audit(limit: int = 50, _: None = Depends(require_admin_key)) -> list[di
 def subscriptions(limit: int = 100, _: None = Depends(require_admin_key)) -> list[dict[str, Any]]:
     try:
         return get_subscriptions(limit=min(limit, 500))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/users")
+def users(limit: int = 200, _: None = Depends(require_admin_key)) -> list[dict[str, Any]]:
+    try:
+        return get_users(limit=min(limit, 500))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/backup")
+def backup(_: None = Depends(require_admin_key)) -> dict[str, Any]:
+    try:
+        return export_backup()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

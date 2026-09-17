@@ -75,6 +75,14 @@ def main() -> int:
     # Early window disarm after Tuesday close path
     if "disarm_early_window" not in sched_src:
         fails.append("Tuesday close must disarm in-memory early window")
+    if "refresh_voting_open_banners" not in sched_src:
+        fails.append("Tuesday close must rewrite VOTING OPEN banners")
+    if "on_raw_message_delete" not in weekly_src:
+        fails.append("deleted VOTING OPEN banners must be restored")
+    if "rules_gate" not in (ROOT / "cogs" / "onboarding.py").read_text(encoding="utf-8"):
+        fails.append("RULES gate message id must be cached in message_state")
+    if "on_raw_message_delete" not in (ROOT / "cogs" / "submission_ui.py").read_text(encoding="utf-8"):
+        fails.append("deleted live-chosen-tickers board must be restored")
     restore_src = inspect.getsource(
         __import__("cogs.weekly_picks", fromlist=["WeeklyPicksCog"]).WeeklyPicksCog._restore_early_window_from_cycle
     )

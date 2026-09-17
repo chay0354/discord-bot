@@ -22,6 +22,7 @@ from config import (
 
 GATE_MARKER = "npc-gate-v1"  # legacy: delete if our bot posted one before
 RULES_GUIDE_MARKER = "stock-game-rules-v1"
+_RULES_GATE_STATE_KEY = "rules_gate"
 
 
 def rules_guide_embed(gate_url: str) -> discord.Embed:
@@ -86,6 +87,13 @@ class OnboardingCog(commands.Cog):
 
         gate: discord.Message | None = None
         guide: discord.Message | None = None
+        cached = database.get_message_state(guild.id, _RULES_GATE_STATE_KEY) or {}
+        cached_id = cached.get("message_id")
+        if cached_id:
+            try:
+                gate = await channel.fetch_message(int(cached_id))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                gate = None
         try:
             async for msg in channel.history(limit=50):
                 # Remove legacy duplicate embeds posted by this bot.
@@ -113,6 +121,16 @@ class OnboardingCog(commands.Cog):
             return
 
         self._gate_message_ids[guild.id] = gate.id
+        try:
+            database.save_message_state(
+                guild.id,
+                _RULES_GATE_STATE_KEY,
+                channel_id=channel.id,
+                message_id=gate.id,
+                payload={"kind": "rules_gate"},
+            )
+        except Exception as exc:
+            print(f"[onboarding] cache rules gate failed: {exc!r}", flush=True)
         embed = rules_guide_embed(gate.jump_url)
         try:
             if guide:
@@ -126,6 +144,28 @@ class OnboardingCog(commands.Cog):
             f"(author={gate.author})",
             flush=True,
         )
+        await self._backfill_gate_reactors(guild, gate)
+
+    async def _backfill_gate_reactors(self, guild: discord.Guild, gate: discord.Message) -> None:
+        """Grant NPC to members who already reacted but never received the role."""
+        granted = 0
+        for reaction in gate.reactions:
+            if str(reaction.emoji) not in NPC_GATE_EMOJIS:
+                continue
+            try:
+                async for user in reaction.users(limit=500):
+                    if user.bot:
+                        continue
+                    member = guild.get_member(user.id)
+                    if member is None:
+                        continue
+                    if not ({"PLAYER", "WINNER", "NPC"} & member_role_keys(member)):
+                        granted += 1
+                    await self._grant_npc(member)
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+        if granted:
+            print(f"[onboarding] backfilled NPC for {granted} reactor(s) in {guild.id}", flush=True)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
