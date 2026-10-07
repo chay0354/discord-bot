@@ -30,7 +30,6 @@ from services.email_client import send_email, subscription_email
 from services.stripe_client import (
     StripeClientError,
     create_billing_portal_session,
-    create_checkout_session,
     retrieve_subscription,
     verify_webhook_signature,
 )
@@ -83,6 +82,9 @@ def _stripe_link_view(url: str, *, label: str) -> discord.ui.View:
     return view
 
 
+WEBSITE_REGISTER_URL = os.getenv("WEBSITE_REGISTER_URL", "https://memestock.shop/register")
+
+
 def player_subscribe_embed() -> discord.Embed:
     return discord.Embed(
         title="Subscribe to PLAYER",
@@ -92,7 +94,8 @@ def player_subscribe_embed() -> discord.Embed:
             "• Access to **live leaderboard** channels\n"
             "• Ticker pick channels during pre-vote\n"
             "• Option to buy extra votes in the extra-votes channel\n\n"
-            "Click **Subscribe**, then **Pay on Stripe** to complete checkout.\n\n"
+            "Membership is **$39.99 per week**.\n"
+            "Click **Register** to open the website sign-up page.\n\n"
             f"{game_copy.NOT_INVESTMENT_ADVICE}"
         ),
         color=discord.Color.green(),
@@ -121,36 +124,18 @@ async def _ephemeral_billing_error(interaction: discord.Interaction, message: st
 
 
 class PlayerSubscribeOnlyView(discord.ui.View):
+    """Link button. Discord opens the website; the bot does not handle the click."""
+
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=None)
         self.bot = bot
-
-    @discord.ui.button(
-        label="Subscribe",
-        style=discord.ButtonStyle.success,
-        custom_id="billing:subscribe",
-    )
-    async def subscribe_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        try:
-            if not interaction.guild or not isinstance(interaction.user, discord.Member):
-                await interaction.response.send_message("Use this in the server.", ephemeral=True)
-                return
-            await interaction.response.defer(ephemeral=True)
-            url = await asyncio.to_thread(
-                create_checkout_session,
-                interaction.user.id,
-                str(interaction.user),
+        self.add_item(
+            discord.ui.Button(
+                label="Register",
+                style=discord.ButtonStyle.link,
+                url=WEBSITE_REGISTER_URL,
             )
-            database.upsert_user(interaction.user.id, username=str(interaction.user))
-            await interaction.followup.send(
-                "Tap **Pay on Stripe** below to open the secure checkout page.",
-                view=_stripe_link_view(url, label="Pay on Stripe"),
-                ephemeral=True,
-            )
-        except StripeClientError as exc:
-            await _ephemeral_billing_error(interaction, f"Payments are not available right now: {exc}")
-        except Exception as exc:
-            await _ephemeral_billing_error(interaction, f"Subscribe failed: {exc}")
+        )
 
 
 class PlayerManageSubscriptionView(discord.ui.View):
@@ -968,23 +953,17 @@ class BillingCog(commands.Cog):
     @commands.command(name="subscribe")
     @commands.guild_only()
     async def subscribe(self, ctx: commands.Context) -> None:
-        try:
-            url = await asyncio.to_thread(create_checkout_session, ctx.author.id, str(ctx.author))
-        except StripeClientError as exc:
-            await ctx.send(f"Stripe is not configured yet: {exc}")
-            return
-        database.upsert_user(ctx.author.id, username=str(ctx.author))
-        pay_view = _stripe_link_view(url, label="Pay on Stripe")
+        view = _stripe_link_view(WEBSITE_REGISTER_URL, label="Register")
         try:
             await ctx.author.send(
-                "Open the Stripe payment page:",
-                view=pay_view,
+                "Register on the website to become a PLAYER. Membership is **$39.99 per week**.",
+                view=view,
             )
-            await ctx.reply("I sent you a DM with **Pay on Stripe**.", mention_author=False)
+            await ctx.reply("I sent you a DM with the registration link.", mention_author=False)
         except Exception:
             await ctx.reply(
                 "I could not DM you. Use the button below:",
-                view=pay_view,
+                view=view,
                 mention_author=False,
             )
 
