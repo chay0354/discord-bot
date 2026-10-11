@@ -283,6 +283,19 @@ def _period_end_from_subscription(subscription: dict[str, Any]) -> str | None:
         return None
 
 
+def _subscription_id_from_payload(obj: dict[str, Any]) -> str | None:
+    kind = obj.get("object")
+    if kind == "subscription":
+        return obj.get("id")
+    raw = obj.get("subscription")
+    if not raw and kind == "invoice":
+        # Stripe API 2025-03+ moved invoice.subscription under parent.
+        raw = ((obj.get("parent") or {}).get("subscription_details") or {}).get("subscription")
+    if isinstance(raw, dict):
+        raw = raw.get("id")
+    return str(raw) if raw else None
+
+
 def _discord_id_from_payload(obj: dict[str, Any]) -> int | None:
     for source in (obj.get("metadata") or {}, obj):
         raw = source.get("discord_id") or source.get("client_reference_id")
@@ -431,10 +444,18 @@ class BillingCog(commands.Cog):
         except Exception:
             pass  # fall back to whatever members are already cached
         assigned = 0
+        try:
+            paid_ids = await asyncio.to_thread(database.paid_member_ids)
+        except Exception:
+            paid_ids = set()
         for member in guild.members:
             if member.bot:
                 continue
             existing = member_role_keys(member)
+            if member.id in paid_ids and not ({"PLAYER", "WINNER"} & existing):
+                if await self._set_player_role(member.id, True, reason="npc_reconcile_paid"):
+                    assigned += 1
+                continue
             # Heal legacy conflicts: a PLAYER/WINNER must not also carry NPC,
             # otherwise channel overwrites collide (NPC 'view' allow leaks the
             # subscribe funnel past the PLAYER deny).
@@ -658,8 +679,8 @@ class BillingCog(commands.Cog):
     async def _sync_subscription(
         self, obj: dict[str, Any], event_type: str, event_id: str | None = None
     ) -> tuple[int | None, str | None]:
-        subscription_id = obj.get("subscription") or obj.get("id")
         subscription = obj if obj.get("object") == "subscription" else None
+        subscription_id = _subscription_id_from_payload(obj)
         if subscription_id and not subscription:
             try:
                 subscription = await asyncio.to_thread(retrieve_subscription, str(subscription_id))
@@ -706,6 +727,9 @@ class BillingCog(commands.Cog):
         )
 
         status = (subscription or obj).get("status") or "unknown"
+        if subscription is None and obj.get("object") == "invoice":
+            # Invoice statuses (paid/open/void) are not membership statuses.
+            status = "active" if obj.get("status") == "paid" else (prior or {}).get("status") or "unknown"
         payment_status = obj.get("payment_status") or (subscription or {}).get("collection_method")
         cancel_at_period_end = bool((subscription or {}).get("cancel_at_period_end"))
         current_period_end = _period_end_from_subscription(subscription or {})
@@ -741,7 +765,7 @@ class BillingCog(commands.Cog):
             status=status,
             payment_status=payment_status,
             stripe_customer_id=(subscription or obj).get("customer"),
-            stripe_subscription_id=(subscription or {}).get("id") or obj.get("subscription"),
+            stripe_subscription_id=(subscription or {}).get("id") or _subscription_id_from_payload(obj),
             current_period_end=current_period_end,
             canceled_at=canceled_at,
             last_event_type=event_type,

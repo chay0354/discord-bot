@@ -468,9 +468,18 @@ def recent_stripe_events(limit: int = 25) -> list[dict[str, Any]]:
     )
 
 
+PAID_MEMBER_STATUSES = ("active", "trialing", "active_until_period_end", "past_due_grace")
+
+
 def is_paid_member(discord_id: int) -> bool:
     row = _single("subscriptions", f"?select=status&discord_id=eq.{discord_id}&limit=1")
-    return bool(row and row["status"] in {"active", "trialing", "active_until_period_end", "past_due_grace"})
+    return bool(row and row["status"] in PAID_MEMBER_STATUSES)
+
+
+def paid_member_ids() -> set[int]:
+    statuses = ",".join(PAID_MEMBER_STATUSES)
+    rows = _select("subscriptions", f"?select=discord_id&status=in.({statuses})&limit=5000")
+    return {int(r["discord_id"]) for r in rows if r.get("discord_id")}
 
 
 def get_subscription(discord_id: int) -> dict[str, Any] | None:

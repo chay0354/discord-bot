@@ -381,6 +381,28 @@ async def main() -> int:
     check("unmapped returns no discord_id", res9.get("discord_id") is None, str(res9))
     check("unmapped is not marked processed", db.events["evt_9"].get("processed") is not True)
 
+    # ---- Scenario 10: new Stripe API invoice (subscription under parent) --
+    print("\nScenario 10: invoice without top-level subscription keeps PLAYER")
+    D = 444
+    guild.add_member(D)
+    _sub_customer["sub_D"] = "cus_D"
+    await cog.process_stripe_webhook_payload(
+        evt("evt_10a", "checkout.session.completed", checkout_completed(D, "cus_D", "sub_D", email="d@example.com"))
+    )
+    new_invoice = {
+        "object": "invoice", "id": "in_D", "customer": "cus_D", "status": "paid",
+        "parent": {"subscription_details": {"subscription": "sub_D"}},
+        "metadata": {"discord_id": str(D)},
+    }
+    await cog.process_stripe_webhook_payload(evt("evt_10b", "invoice.payment_succeeded", new_invoice))
+    check("status stays active (not 'paid')", db.subs[D]["status"] == "active", str(db.subs.get(D)))
+    check("PLAYER kept after new-format invoice", guild.player_role in guild.get_member(D).roles)
+    billing.retrieve_subscription = lambda _id: (_ for _ in ()).throw(RuntimeError("down"))
+    await cog.process_stripe_webhook_payload(evt("evt_10c", "invoice.payment_succeeded", dict(new_invoice, id="in_D2")))
+    billing.retrieve_subscription = fake_retrieve
+    check("paid invoice without retrievable sub maps to active", db.subs[D]["status"] == "active", str(db.subs.get(D)))
+    check("PLAYER kept when Stripe lookup fails", guild.player_role in guild.get_member(D).roles)
+
     print("\n" + ("=" * 52))
     if failures:
         print(f"RESULT: FAILED ({len(failures)} check(s)): {', '.join(failures)}")
