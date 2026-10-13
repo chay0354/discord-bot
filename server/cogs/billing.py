@@ -29,6 +29,7 @@ from discord_names import find_game_role, find_text_channel, logical_role_key, m
 from services.email_client import send_email, subscription_email
 from services.stripe_client import (
     StripeClientError,
+    StripeCustomerMissing,
     create_billing_portal_session,
     retrieve_subscription,
     verify_webhook_signature,
@@ -83,6 +84,13 @@ def _stripe_link_view(url: str, *, label: str) -> discord.ui.View:
 
 
 WEBSITE_REGISTER_URL = os.getenv("WEBSITE_REGISTER_URL", "https://memestock.shop/register")
+
+
+def _missing_billing_message() -> str:
+    return (
+        "No active billing account was found for you. "
+        f"Subscribe on the website to start one: {WEBSITE_REGISTER_URL}"
+    )
 
 
 def player_subscribe_embed() -> discord.Embed:
@@ -170,6 +178,8 @@ class PlayerManageSubscriptionView(discord.ui.View):
                 view=_stripe_link_view(url, label="Manage billing"),
                 ephemeral=True,
             )
+        except StripeCustomerMissing:
+            await _ephemeral_billing_error(interaction, _missing_billing_message())
         except StripeClientError as exc:
             await _ephemeral_billing_error(interaction, f"Billing portal unavailable: {exc}")
         except Exception as exc:
@@ -1021,6 +1031,9 @@ class BillingCog(commands.Cog):
             return
         try:
             url = await asyncio.to_thread(create_billing_portal_session, customer_id)
+        except StripeCustomerMissing:
+            await ctx.reply(_missing_billing_message(), mention_author=False)
+            return
         except StripeClientError as exc:
             await ctx.reply(f"Stripe billing portal is not configured yet: {exc}", mention_author=False)
             return

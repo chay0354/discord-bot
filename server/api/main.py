@@ -56,7 +56,7 @@ def health() -> dict[str, str]:
 
 
 @app.post("/stripe/webhook")
-async def stripe_webhook(request: Request) -> dict[str, bool]:
+async def stripe_webhook(request: Request) -> dict[str, Any]:
     """Stripe endpoint when CRM API shares Railway PORT (no second listener).
 
     Process even if Discord ``on_ready`` has not fired yet: the subscription is

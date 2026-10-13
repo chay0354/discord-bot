@@ -17,6 +17,10 @@ class StripeClientError(RuntimeError):
     pass
 
 
+class StripeCustomerMissing(StripeClientError):
+    """The stored customer id belongs to a different Stripe account or mode."""
+
+
 def _settings(*, require_price: bool = False) -> StripeSettings:
     settings = StripeSettings()
     if not settings.secret_key:
@@ -110,6 +114,12 @@ def create_billing_portal_session(customer_id: str) -> str:
         timeout=15,
     )
     if response.status_code >= 400:
+        try:
+            error = response.json().get("error") or {}
+        except ValueError:
+            error = {}
+        if error.get("code") == "resource_missing" and error.get("param") == "customer":
+            raise StripeCustomerMissing(customer_id)
         raise StripeClientError(f"Stripe portal session failed: {response.status_code} {response.text}")
     return response.json()["url"]
 
