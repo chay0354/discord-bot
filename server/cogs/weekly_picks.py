@@ -569,6 +569,26 @@ def _schedule_leaderboard_update(guild: discord.Guild, cat: int) -> None:
     _leaderboard_update_tasks[key] = asyncio.create_task(_run())
 
 
+async def clear_live_closed_banners(guild: discord.Guild, cat: int) -> int:
+    """Remove ``CHANNEL CURRENTLY CLOSED`` banners from a -live channel."""
+    ch = _find_text_channel(guild, _category_idx_to_live_name(cat))
+    if not ch:
+        return 0
+    removed = 0
+    try:
+        async for msg in ch.history(limit=50):
+            if msg.author == guild.me and msg.embeds:
+                if (msg.embeds[0].title or "").strip().upper() == "CHANNEL CURRENTLY CLOSED":
+                    try:
+                        await msg.delete()
+                        removed += 1
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return removed
+
+
 async def _post_or_update_leaderboard(
     guild: discord.Guild, cat: int, *, force: bool = False
 ) -> None:
@@ -613,6 +633,10 @@ async def _post_or_update_leaderboard(
                 e = msg.embeds[0]
                 title = (e.title or "").strip()
                 if title.upper() == "CHANNEL CURRENTLY CLOSED":
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
                     continue
                 if title.upper() == live_title or title.startswith("🏆 LIVE LEADERBOARD —"):
                     await msg.edit(embed=emb)
@@ -716,6 +740,114 @@ def _exhausted_vote_view(tickers: List[str]) -> discord.ui.View:
     return view
 
 
+async def _site_balance_for(user_id: int) -> int:
+    """Spendable website vote balance, or 0 when unlinked/blocked/unreachable."""
+    try:
+        info = await asyncio.to_thread(database.site_vote_balance, user_id)
+    except Exception:
+        return 0
+    if not info.get("account_ready"):
+        return 0
+    try:
+        return max(0, int(info.get("available") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _site_vote_button(cat: int, ticker: str, tickers: List[str], balance: int) -> discord.ui.Button:
+    btn = discord.ui.Button(
+        label=f"Use 1 site vote on ${ticker} ({balance} left)"[:80],
+        style=discord.ButtonStyle.success,
+        row=4,
+    )
+
+    async def _cb(interaction: discord.Interaction) -> None:
+        await _spend_site_vote(interaction, cat=cat, ticker=ticker, tickers=tickers)
+
+    btn.callback = _cb  # type: ignore
+    return btn
+
+
+async def _spend_site_vote(
+    interaction: discord.Interaction, *, cat: int, ticker: str, tickers: List[str]
+) -> None:
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except discord.InteractionResponded:
+        pass
+    guild = interaction.guild
+    member = interaction.user
+    if not guild or not isinstance(member, discord.Member) or not _can_vote(member):
+        await interaction.followup.send("You need a game role before you can vote.", ephemeral=True)
+        return
+    key = (guild.id, member.id)
+    lock = _vote_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        week_key = await asyncio.to_thread(database.open_voting_week_key, guild.id)
+        if not week_key:
+            await interaction.followup.send(
+                "Voting is closed. Your site votes were not used.", ephemeral=True
+            )
+            return
+        category_key = CATEGORIES[cat]
+        role = _role_snapshot(member)
+        # The interaction id names the operation: retries of THIS click are
+        # idempotent, and every new spend needs a new explicit click.
+        op_id = f"dc_{interaction.id}"
+        result: dict | None = None
+        for attempt in range(3):
+            try:
+                result = await asyncio.to_thread(
+                    database.spend_site_votes,
+                    op_id, guild.id, week_key, category_key, ticker, member.id, role, 1,
+                )
+                break
+            except Exception:
+                if attempt == 2:
+                    result = None
+                else:
+                    await asyncio.sleep(1.5)
+        if result is None:
+            await interaction.followup.send(
+                "We could not confirm the site vote right now. Please check again in a minute "
+                "before retrying; you will never be charged twice for this click.",
+                ephemeral=True,
+            )
+            return
+        if not result.get("ok"):
+            reason = result.get("reason")
+            text = {
+                "closed": "Voting is closed. Your site votes were not used.",
+                "not_linked": "Link your Discord account on memestock.shop to use site votes.",
+                "account_blocked": "Your website account cannot use site votes right now. Contact support.",
+                "insufficient": "You have no site votes left. Buy more on memestock.shop/votes.",
+                "busy": "Your site balance is being updated. Please try again in a few seconds.",
+            }.get(str(reason), "Your site vote could not be used. Please try again.")
+            await interaction.followup.send(text, ephemeral=True)
+            return
+
+        if not result.get("duplicate"):
+            _ensure_user_slot(cat, member.id).append(ticker)
+            _inc_count(cat, ticker, +1)
+            _schedule_leaderboard_update(guild, cat)
+            asyncio.create_task(asyncio.to_thread(
+                database.log_event, guild.id, "site_vote_spent",
+                {"user_id": member.id, "week_key": week_key, "category": category_key,
+                 "ticker": ticker, "operation_id": op_id},
+            ))
+        left = int(result.get("available") or 0)
+        on_ticker = _ensure_user_slot(cat, member.id).count(ticker)
+        live = game_copy.mention_live(guild, cat)
+        body = (
+            f"USED 1 SITE VOTE ON ${ticker} — you now have {on_ticker} vote(s) on ${ticker}.\n"
+            f"Site votes left: **{left}**. Watch results live in {live}"
+        )
+        view = _exhausted_vote_view(tickers)
+        if left > 0:
+            view.add_item(_site_vote_button(cat, ticker, tickers, left))
+        await interaction.followup.send(body, view=view, ephemeral=True)
+
+
 async def _send_vote_limit(
     interaction: discord.Interaction,
     *,
@@ -723,6 +855,7 @@ async def _send_vote_limit(
     is_npc: bool,
     tickers: List[str],
     prefix: str = "",
+    spend_ticker: str | None = None,
 ) -> None:
     # NPC subscribe line already lives under YOU PICKED when this is the last vote.
     body = game_copy.vote_limit_message(
@@ -730,11 +863,16 @@ async def _send_vote_limit(
     )
     if prefix:
         body = f"{prefix}\n\n{body}"
-    await interaction.followup.send(
-        body,
-        view=_exhausted_vote_view(tickers),
-        ephemeral=True,
-    )
+    view = _exhausted_vote_view(tickers)
+    if spend_ticker and len(tickers) <= 20:
+        balance = await _site_balance_for(interaction.user.id)
+        if balance > 0:
+            body += (
+                f"\n\nYou have **{balance}** site vote(s) from memestock.shop. "
+                f"Press the green button to add 1 more vote on **${spend_ticker}**."
+            )
+            view.add_item(_site_vote_button(cat, spend_ticker, tickers, balance))
+    await interaction.followup.send(body, view=view, ephemeral=True)
 
 
 class WeeklyVotingView(discord.ui.View):
@@ -958,6 +1096,12 @@ class WeeklyVotingView(discord.ui.View):
             )
             return
         limit = _vote_limit_for(member, week_key)
+        try:
+            limit += await asyncio.to_thread(
+                database.site_votes_spent, guild.id, week_key, category_key, member.id
+            )
+        except Exception:
+            pass
         role_at_vote = _role_snapshot(member)
         ticker = ticker.upper().strip().lstrip("$")
 
@@ -977,6 +1121,7 @@ class WeeklyVotingView(discord.ui.View):
                 cat=cat,
                 is_npc=role_at_vote == "NPC",
                 tickers=self.tickers,
+                spend_ticker=ticker,
             )
             return
 
@@ -1005,6 +1150,7 @@ class WeeklyVotingView(discord.ui.View):
                     cat=save_cat,
                     is_npc=role_at_vote == "NPC",
                     tickers=self.tickers,
+                    spend_ticker=ticker if save_cat == cat else None,
                 )
                 return
             await interaction.followup.send(err_msg, ephemeral=True)

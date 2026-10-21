@@ -52,6 +52,7 @@ from cogs.weekly_picks import (
     build_weekly_voting_view,
     build_final_leaderboard_embeds,
     _post_or_update_leaderboard,
+    clear_live_closed_banners,
     _category_idx_to_weekly_name,
     _category_title,
     _delete_bot_messages,
@@ -689,6 +690,7 @@ class SchedulerCog(commands.Cog):
                 continue
 
             try:
+                await clear_live_closed_banners(guild, cat)
                 await _post_or_update_leaderboard(guild, cat)
                 leaderboards_ok += 1
             except Exception:

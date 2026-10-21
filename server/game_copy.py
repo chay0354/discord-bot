@@ -219,13 +219,14 @@ def vote_limit_message(cat: int | str, *, is_npc: bool, guild=None) -> str:
 def voting_closed_description(guild=None) -> str:
     lb = mention_leaderboard(guild)
     winners = mention_winners(guild)
-    player = mention_player(guild)
+    # Plain role name: PLAYER members cannot see the subscribe channel, so a
+    # channel mention renders as "No Access" for exactly the audience addressed.
     return (
         "Voting will resume Monday at 9 AM EST.\n"
         "To review this week’s top-ranked tickers and winners:\n"
         f"{lb}\n"
         f"{winners}\n"
-        f"CHOOSE YOUR TICKER is now open for {player} and WINNER roles.\n"
+        "CHOOSE YOUR TICKER is now open for **PLAYER** and **WINNER** roles.\n"
         f"{NOT_INVESTMENT_ADVICE}"
     )
 

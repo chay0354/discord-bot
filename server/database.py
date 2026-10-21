@@ -821,6 +821,54 @@ def record_vote(
         raise
 
 
+def site_vote_balance(discord_id: int) -> dict[str, Any]:
+    """Website-purchased vote balance linked to this Discord account."""
+    row = _request("POST", "rpc/site_vote_balance", json_body={"p_discord_id": discord_id})
+    return row if isinstance(row, dict) else {"linked": False, "account_ready": False, "available": 0}
+
+
+def site_votes_spent(guild_id: int, week_key: str, category: str, user_id: int) -> int:
+    """Votes this user paid for from the website wallet (outside the weekly limit)."""
+    rows = _select(
+        "site_vote_spends",
+        f"?select=amount&guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
+        f"&category=eq.{category}&user_id=eq.{user_id}",
+    )
+    return sum(int(r.get("amount") or 0) for r in rows)
+
+
+def spend_site_votes(
+    operation_id: str,
+    guild_id: int,
+    week_key: str,
+    category: str,
+    ticker: str,
+    user_id: int,
+    role_at_vote: str,
+    amount: int = 1,
+) -> dict[str, Any]:
+    """Atomically debit the website wallet and record ``amount`` votes.
+
+    Idempotent per ``operation_id``: a retry returns ``duplicate`` and never
+    debits or counts twice.
+    """
+    row = _request(
+        "POST",
+        "rpc/spend_site_votes",
+        json_body={
+            "p_op_id": operation_id,
+            "p_guild_id": guild_id,
+            "p_week_key": week_key,
+            "p_category": category,
+            "p_ticker": ticker.upper(),
+            "p_discord_id": user_id,
+            "p_role": role_at_vote,
+            "p_amount": amount,
+        },
+    )
+    return row if isinstance(row, dict) else {"ok": False, "reason": "error"}
+
+
 def user_vote_count(guild_id: int, week_key: str, category: str, user_id: int) -> int:
     rows = _select(
         "votes",
