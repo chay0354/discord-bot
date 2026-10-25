@@ -831,10 +831,16 @@ def site_votes_spent(guild_id: int, week_key: str, category: str, user_id: int) 
     """Votes this user paid for from the website wallet (outside the weekly limit)."""
     rows = _select(
         "site_vote_spends",
-        f"?select=amount&guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
+        f"?select=vote_ids&guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}"
         f"&category=eq.{category}&user_id=eq.{user_id}",
     )
-    return sum(int(r.get("amount") or 0) for r in rows)
+    ids = [int(i) for r in rows for i in (r.get("vote_ids") or [])]
+    if not ids:
+        return 0
+    # Only paid votes that still exist count: a week reset deletes the votes
+    # but keeps the spend audit rows.
+    existing = _select("votes", f"?select=id&id=in.({','.join(map(str, ids))})")
+    return len(existing)
 
 
 def spend_site_votes(
