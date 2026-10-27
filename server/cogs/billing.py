@@ -770,6 +770,25 @@ class BillingCog(commands.Cog):
         elif cancel_at_period_end and status == "active":
             status = "active_until_period_end"
 
+        incoming_sub_id = (subscription or {}).get("id") or _subscription_id_from_payload(obj)
+        prior_sub_id = (prior or {}).get("stripe_subscription_id")
+        if (
+            was_active
+            and status not in ACTIVE_STATUSES
+            and incoming_sub_id
+            and prior_sub_id
+            and str(prior_sub_id) != str(incoming_sub_id)
+        ):
+            # A late event for an older subscription (for example one cancelled when the
+            # website account was deleted) must not end the member's current subscription.
+            database.log_event(
+                None,
+                "stripe_webhook_stale_subscription",
+                {"type": event_type, "event_id": event_id, "discord_id": discord_id,
+                 "incoming": str(incoming_sub_id), "current": str(prior_sub_id)},
+            )
+            return discord_id, (prior or {}).get("status")
+
         database.upsert_subscription(
             discord_id,
             status=status,

@@ -403,6 +403,35 @@ async def main() -> int:
     check("paid invoice without retrievable sub maps to active", db.subs[D]["status"] == "active", str(db.subs.get(D)))
     check("PLAYER kept when Stripe lookup fails", guild.player_role in guild.get_member(D).roles)
 
+    # ---- Scenario 11: deleted account re-registers with the same Discord --
+    print("\nScenario 11: late event for a deleted account's old subscription keeps the new one")
+    E = 555
+    guild.add_member(E)
+    _sub_customer["sub_E_old"] = "cus_E_old"
+    _sub_customer["sub_E_new"] = "cus_E_new"
+    await cog.process_stripe_webhook_payload(
+        evt("evt_11a", "checkout.session.completed", checkout_completed(E, "cus_E_old", "sub_E_old", email="e@example.com"))
+    )
+    await cog.process_stripe_webhook_payload(
+        evt("evt_11b", "customer.subscription.deleted", subscription_obj(E, "cus_E_old", "sub_E_old", status="canceled", canceled=True))
+    )
+    check("old subscription canceled on delete", db.subs[E]["status"] == "canceled")
+    check("PLAYER removed after delete", guild.player_role not in guild.get_member(E).roles)
+    await cog.process_stripe_webhook_payload(
+        evt("evt_11c", "checkout.session.completed", checkout_completed(E, "cus_E_new", "sub_E_new", email="e@example.com"))
+    )
+    check("new subscription active", db.subs[E]["status"] == "active" and db.subs[E].get("stripe_subscription_id") == "sub_E_new", str(db.subs.get(E)))
+    await cog.process_stripe_webhook_payload(
+        evt("evt_11d", "customer.subscription.deleted", subscription_obj(E, "cus_E_old", "sub_E_old", status="canceled", canceled=True))
+    )
+    check("late old-sub event ignored", db.subs[E]["status"] == "active" and db.subs[E].get("stripe_subscription_id") == "sub_E_new", str(db.subs.get(E)))
+    check("PLAYER kept on new subscription", guild.player_role in guild.get_member(E).roles)
+    await cog.process_stripe_webhook_payload(
+        evt("evt_11e", "customer.subscription.deleted", subscription_obj(E, "cus_E_new", "sub_E_new", status="canceled", canceled=True))
+    )
+    check("cancelling the current subscription still works", db.subs[E]["status"] == "canceled")
+    check("PLAYER removed when current subscription ends", guild.player_role not in guild.get_member(E).roles)
+
     print("\n" + ("=" * 52))
     if failures:
         print(f"RESULT: FAILED ({len(failures)} check(s)): {', '.join(failures)}")
