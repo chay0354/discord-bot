@@ -610,6 +610,11 @@ class BillingCog(commands.Cog):
                 elif not active and role in member.roles:
                     await member.remove_roles(role, reason=reason)
                     changed = True
+                    # member.roles is not refreshed until the gateway event, so decide from the old set.
+                    if not {"WINNER", "NPC"} & (member_role_keys(member) - {"PLAYER"}):
+                        npc = find_game_role(guild, "NPC")
+                        if npc and not (me and npc >= me.top_role):
+                            await member.add_roles(npc, reason=f"{reason} — back to NPC")
                     database.log_event(
                         guild.id,
                         "player_role_removed",
@@ -824,7 +829,9 @@ class BillingCog(commands.Cog):
         # delivery of the same event is skipped earlier by idempotency.
         kind: str | None = None
         if event_type == "invoice.payment_failed":
-            kind = "payment_failed"
+            # Stripe retries a failed invoice several times; warn the member once per invoice.
+            if database.claim_stripe_event(f"notify_failed_{obj.get('id') or event_id}", "notify.payment_failed"):
+                kind = "payment_failed"
         elif status == "canceled":
             kind = "canceled"
         elif status == "active_until_period_end":
