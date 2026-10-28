@@ -831,7 +831,14 @@ class BillingCog(commands.Cog):
             kind = "cancel_scheduled"
         elif active and not was_active:
             kind = "welcome"
-        elif active and was_active and event_type == "invoice.payment_succeeded":
+        elif (
+            active
+            and was_active
+            and event_type == "invoice.payment_succeeded"
+            and obj.get("billing_reason") == "subscription_cycle"
+            # invoice.paid and invoice.payment_succeeded both arrive for one renewal.
+            and database.claim_stripe_event(f"notify_renewal_{obj.get('id') or event_id}", "notify.renewal")
+        ):
             kind = "renewal"
         if kind:
             await self._notify(

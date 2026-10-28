@@ -226,7 +226,7 @@ def checkout_completed(discord_id, customer, sub_id, email="user@example.com"):
 def invoice(event_paid, discord_id, customer, sub_id):
     return {
         "object": "invoice", "customer": customer, "subscription": sub_id,
-        "customer_email": "user@example.com",
+        "customer_email": "user@example.com", "billing_reason": "subscription_cycle",
         "metadata": {"discord_id": str(discord_id)},
     }
 
