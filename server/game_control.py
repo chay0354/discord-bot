@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any
@@ -10,6 +11,7 @@ import app_state
 import database
 from config import CATEGORY_TITLES, CATEGORIES, TICKER_LIMIT_PER_CATEGORY
 from cogs.scheduler import SchedulerCog
+from services import site_bridge, stripe_client
 from services.finnhub_client import format_quote, quote_and_names_for_symbols
 
 
@@ -436,6 +438,74 @@ def get_subscriptions(limit: int = 100) -> list[dict[str, Any]]:
 
 def get_users(limit: int = 200) -> list[dict[str, Any]]:
     return database.list_users(limit=limit)
+
+
+_ENDED_SUBSCRIPTION_STATUSES = {"canceled", "incomplete_expired"}
+
+
+async def delete_user(discord_id: int, reason: str) -> dict[str, Any]:
+    """Delete a member everywhere so the same Discord account can register again cleanly.
+
+    The website account goes first: if it refuses (for example a vote is mid-reservation)
+    nothing on the bot side has changed yet. The Discord member stays in the server.
+    """
+    reason = (reason or "").strip()
+    if not 5 <= len(reason) <= 500:
+        raise ValueError("Add a reason between 5 and 500 characters.")
+    if not site_bridge.is_configured():
+        raise RuntimeError("BRIDGE_SECRET is not set on the bot, so the website account cannot be deleted.")
+
+    try:
+        site = await asyncio.to_thread(
+            site_bridge.post,
+            "/api/bridge/delete-customer",
+            {"discord_id": str(discord_id), "reason": reason},
+        )
+    except site_bridge.SiteBridgeError as exc:
+        raise ValueError(f"Website: {exc}") from exc
+
+    canceled_subscription = None
+    sub = database.get_subscription(discord_id)
+    sub_id = (sub or {}).get("stripe_subscription_id")
+    if sub and sub.get("status") not in _ENDED_SUBSCRIPTION_STATUSES:
+        if sub_id:
+            current = await asyncio.to_thread(stripe_client.retrieve_subscription, str(sub_id))
+            if current.get("status") not in _ENDED_SUBSCRIPTION_STATUSES:
+                await asyncio.to_thread(stripe_client.cancel_subscription, str(sub_id))
+                canceled_subscription = str(sub_id)
+        database.upsert_subscription(
+            discord_id,
+            status="canceled",
+            canceled_at=database.utc_now_iso(),
+            last_event_type="crm_user_deleted",
+        )
+
+    role_removed = False
+    bot = app_state.bot
+    billing = bot.get_cog("BillingCog") if bot else None
+    if billing is not None and app_state.bot_ready:
+        role_removed = await billing._set_player_role(discord_id, False, reason="crm_user_deleted")
+        for guild in bot.guilds:
+            member = await billing._resolve_member(guild, discord_id)
+            if member:
+                await billing._ensure_npc_role(member)
+
+    profile_removed = database.delete_user(discord_id)
+    result = {
+        "ok": True,
+        "discord_id": str(discord_id),
+        "site_account_deleted": bool(site.get("deleted")),
+        "site_user_id": site.get("user_id"),
+        "canceled_subscription": canceled_subscription,
+        "player_role_removed": role_removed,
+        "profile_removed": profile_removed,
+    }
+    try:
+        gid = _guild_id()
+    except Exception:
+        gid = None
+    database.log_event(gid, "crm_user_deleted", {**result, "reason": reason})
+    return result
 
 
 def export_backup() -> dict[str, Any]:

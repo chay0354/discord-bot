@@ -727,14 +727,18 @@ class BillingCog(commands.Cog):
         customer_details = obj.get("customer_details") or {}
         email = customer_details.get("email") or obj.get("customer_email")
         username = (obj.get("metadata") or {}).get("discord_username")
-        database.upsert_user(
-            discord_id,
-            username=username,
-            full_name=customer_details.get("name"),
-            email=email,
-            phone=(customer_details.get("phone") if isinstance(customer_details, dict) else None),
-            marketing_consent=_marketing_consent_from_session(obj),
-        )
+        profile = {
+            "full_name": customer_details.get("name"),
+            "email": email,
+            "phone": (customer_details.get("phone") if isinstance(customer_details, dict) else None),
+            "marketing_consent": (
+                _marketing_consent_from_session(obj) if obj.get("object") == "checkout.session" else None
+            ),
+        }
+        # Subscription/invoice events carry no profile; writing them would recreate a
+        # deleted CRM user and blank the stored username.
+        if username or any(v is not None for v in profile.values()):
+            database.upsert_user(discord_id, username=username, **profile)
 
         status = (subscription or obj).get("status") or "unknown"
         if subscription is None and obj.get("object") == "invoice":

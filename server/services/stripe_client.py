@@ -141,6 +141,25 @@ def verify_webhook_signature(payload: bytes, signature_header: str, webhook_secr
     return any(hmac.compare_digest(expected, signature) for signature in signatures)
 
 
+def cancel_subscription(subscription_id: str) -> dict[str, Any] | None:
+    """Cancel immediately. Returns None when Stripe no longer has the subscription."""
+    settings = _settings()
+    response = requests.delete(
+        f"{STRIPE_API}/subscriptions/{subscription_id}",
+        auth=(settings.secret_key, ""),
+        timeout=15,
+    )
+    if response.status_code >= 400:
+        try:
+            error = response.json().get("error") or {}
+        except ValueError:
+            error = {}
+        if error.get("code") == "resource_missing":
+            return None
+        raise StripeClientError(f"Stripe cancel failed: {response.status_code} {response.text}")
+    return response.json()
+
+
 def retrieve_subscription(subscription_id: str) -> dict[str, Any]:
     settings = _settings()
     response = requests.get(

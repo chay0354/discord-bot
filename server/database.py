@@ -355,6 +355,22 @@ def upsert_user(discord_id: int, username: str | None = None, **fields: Any) -> 
     )
 
 
+def delete_user(discord_id: int) -> bool:
+    """Remove the CRM profile. Falls back to clearing personal fields if other rows still reference it."""
+    query = f"?discord_id=eq.{int(discord_id)}"
+    try:
+        _request("DELETE", "users", query=query)
+        return True
+    except SupabaseError:
+        _request(
+            "PATCH",
+            "users",
+            query=query,
+            json_body={"full_name": None, "email": None, "phone": None, "marketing_consent": None, "updated_at": utc_now_iso()},
+        )
+        return False
+
+
 def upsert_subscription(
     discord_id: int,
     *,

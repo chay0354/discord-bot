@@ -13,6 +13,7 @@ from pydantic import BaseModel
 import app_state
 from api.auth import require_admin_key
 from game_control import (
+    delete_user as game_delete_user,
     export_backup,
     get_audit_logs,
     get_game_history,
@@ -48,6 +49,11 @@ app.add_middleware(
 
 class ActionBody(BaseModel):
     actor_id: int | None = None
+
+
+class DeleteUserBody(BaseModel):
+    reason: str
+    confirm_discord_id: str
 
 
 @app.get("/api/health")
@@ -150,6 +156,24 @@ def subscriptions(limit: int = 100, _: None = Depends(require_admin_key)) -> lis
 def users(limit: int = 200, _: None = Depends(require_admin_key)) -> list[dict[str, Any]]:
     try:
         return get_users(limit=min(limit, 500))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/users/{discord_id}/delete")
+async def delete_user(
+    discord_id: int,
+    body: DeleteUserBody,
+    _: None = Depends(require_admin_key),
+) -> dict[str, Any]:
+    if body.confirm_discord_id.strip() != str(discord_id):
+        raise HTTPException(status_code=400, detail="Type the member's Discord ID to confirm.")
+    try:
+        return await game_delete_user(discord_id, body.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
