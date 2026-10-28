@@ -327,6 +327,11 @@ async def main() -> int:
     check("PLAYER role removed", guild.player_role not in member_a.roles)
     check("payment-failed DM sent", any("failed" in d.lower() for d in member_a.dms), str(member_a.dms))
     check("payment-failed email sent", any("failed" in s.lower() for _, s in notify_emails), str(notify_emails))
+    failed_dms = sum("failed" in d.lower() for d in member_a.dms)
+    await cog.process_stripe_webhook_payload(
+        evt("evt_3_retry", "invoice.payment_failed", invoice(False, A, "cus_A", "sub_A"))
+    )
+    check("retry failure does not DM again", sum("failed" in d.lower() for d in member_a.dms) == failed_dms, str(member_a.dms))
 
     # ---- Scenario 5: cancellation --------------------------------------
     print("\nScenario 5: customer.subscription.deleted cancels")

@@ -727,7 +727,8 @@ class BillingCog(commands.Cog):
                 discord_id = owner
 
         prior = database.get_subscription(discord_id)
-        was_active = bool(prior and prior.get("status") in ACTIVE_STATUSES)
+        prior_status = (prior or {}).get("status")
+        was_active = prior_status in ACTIVE_STATUSES
 
         customer_details = obj.get("customer_details") or {}
         email = customer_details.get("email") or obj.get("customer_email")
@@ -829,8 +830,12 @@ class BillingCog(commands.Cog):
         # delivery of the same event is skipped earlier by idempotency.
         kind: str | None = None
         if event_type == "invoice.payment_failed":
-            # Stripe retries a failed invoice several times; warn the member once per invoice.
-            if database.claim_stripe_event(f"notify_failed_{obj.get('id') or event_id}", "notify.payment_failed"):
+            # Stripe retries a failed invoice and keeps issuing weekly invoices while past due;
+            # warn once when the problem starts, never after the subscription has ended.
+            already_failing = prior_status in {"payment_failed", "past_due", "unpaid", "canceled"}
+            if not already_failing and database.claim_stripe_event(
+                f"notify_failed_{obj.get('id') or event_id}", "notify.payment_failed"
+            ):
                 kind = "payment_failed"
         elif status == "canceled":
             kind = "canceled"
