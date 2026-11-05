@@ -469,8 +469,9 @@ async def delete_user(discord_id: int, reason: str) -> dict[str, Any]:
     sub_id = (sub or {}).get("stripe_subscription_id")
     if sub and sub.get("status") not in _ENDED_SUBSCRIPTION_STATUSES:
         if sub_id:
+            # Missing IDs are leftovers from an older Stripe account or sandbox.
             current = await asyncio.to_thread(stripe_client.retrieve_subscription, str(sub_id))
-            if current.get("status") not in _ENDED_SUBSCRIPTION_STATUSES:
+            if current and current.get("status") not in _ENDED_SUBSCRIPTION_STATUSES:
                 await asyncio.to_thread(stripe_client.cancel_subscription, str(sub_id))
                 canceled_subscription = str(sub_id)
         database.upsert_subscription(

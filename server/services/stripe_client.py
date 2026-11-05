@@ -160,7 +160,8 @@ def cancel_subscription(subscription_id: str) -> dict[str, Any] | None:
     return response.json()
 
 
-def retrieve_subscription(subscription_id: str) -> dict[str, Any]:
+def retrieve_subscription(subscription_id: str) -> dict[str, Any] | None:
+    """Return the subscription, or None when Stripe no longer has it."""
     settings = _settings()
     response = requests.get(
         f"{STRIPE_API}/subscriptions/{subscription_id}",
@@ -168,5 +169,11 @@ def retrieve_subscription(subscription_id: str) -> dict[str, Any]:
         timeout=15,
     )
     if response.status_code >= 400:
+        try:
+            error = response.json().get("error") or {}
+        except ValueError:
+            error = {}
+        if error.get("code") == "resource_missing":
+            return None
         raise StripeClientError(f"Stripe subscription lookup failed: {response.status_code} {response.text}")
     return response.json()
