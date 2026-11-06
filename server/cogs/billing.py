@@ -430,11 +430,47 @@ class BillingCog(commands.Cog):
             print(f"[billing] could not add NPC role to {member.id}: {exc!r}", flush=True)
             return False
 
+    async def _retire_missing_subscriptions(self) -> int:
+        """A subscription id from an old Stripe account no longer exists. End it locally
+        so it cannot keep PLAYER or block a later delete."""
+        retired = 0
+        for row in database.open_subscriptions():
+            sub_id = str(row.get("stripe_subscription_id") or "")
+            discord_id = row.get("discord_id")
+            if not sub_id or not discord_id:
+                continue
+            try:
+                current = await asyncio.to_thread(retrieve_subscription, sub_id)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[billing] could not check subscription {sub_id}: {exc!r}", flush=True)
+                continue
+            if current is not None:
+                continue
+            discord_id = int(discord_id)
+            database.upsert_subscription(
+                discord_id,
+                status="canceled",
+                canceled_at=database.utc_now_iso(),
+                last_event_type="stripe_subscription_missing",
+            )
+            database.log_event(
+                None,
+                "stripe_subscription_missing",
+                {"discord_id": discord_id, "stripe_subscription_id": sub_id},
+            )
+            await self._set_player_role(discord_id, False, reason="stripe_subscription_missing")
+            retired += 1
+        return retired
+
     @tasks.loop(minutes=5)
     async def _npc_reconcile_loop(self) -> None:
         """Safety net: ensure every member has a role even if the join event was
         missed (e.g. members intent off, downtime, cache miss). Runs on startup
         and every 5 minutes."""
+        try:
+            await self._retire_missing_subscriptions()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[billing] stale subscription check failed: {exc!r}", flush=True)
         for guild in list(self.bot.guilds):
             try:
                 await self._reconcile_all_npc(guild)

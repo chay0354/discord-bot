@@ -487,6 +487,15 @@ def recent_stripe_events(limit: int = 25) -> list[dict[str, Any]]:
 PAID_MEMBER_STATUSES = ("active", "trialing", "active_until_period_end", "past_due_grace")
 
 
+def open_subscriptions() -> list[dict[str, Any]]:
+    """Subscriptions the bot still treats as ongoing. A Stripe 404 means the row is stale."""
+    return _select(
+        "subscriptions",
+        "?select=discord_id,status,stripe_subscription_id"
+        "&status=not.in.(canceled,incomplete_expired)&limit=100",
+    )
+
+
 def is_paid_member(discord_id: int) -> bool:
     row = _single("subscriptions", f"?select=status&discord_id=eq.{discord_id}&limit=1")
     return bool(row and row["status"] in PAID_MEMBER_STATUSES)
