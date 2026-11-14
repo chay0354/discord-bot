@@ -117,6 +117,9 @@ class FakeDB:
         row = self.subs.get(discord_id)
         return bool(row and row.get("status") in billing.ACTIVE_STATUSES)
 
+    def grace_subscriptions(self):
+        return [row for row in self.subs.values() if row.get("status") == "past_due_grace"]
+
     def log_event(self, guild_id, event_type, details):
         self.audit.append({"event_type": event_type, "details": details})
 
@@ -323,20 +326,36 @@ async def main() -> int:
     check("invoice.paid accepted", res_paid.get("type") == "invoice.payment_succeeded", str(res_paid))
     check("still active after invoice.paid", db.subs[A]["status"] == "active")
 
-    # ---- Scenario 4: payment failure removes role -----------------------
-    print("\nScenario 4: invoice.payment_failed removes PLAYER + alerts user")
+    # ---- Scenario 4: a late renewal charge keeps PLAYER for 3 hours ------
+    print("\nScenario 4: renewal payment delay keeps PLAYER during the grace window")
     await cog.process_stripe_webhook_payload(
         evt("evt_3", "invoice.payment_failed", invoice(False, A, "cus_A", "sub_A"))
     )
-    check("status payment_failed", db.subs[A]["status"] == "payment_failed")
-    check("PLAYER role removed", guild.player_role not in member_a.roles)
+    check("status past_due_grace", db.subs[A]["status"] == "past_due_grace")
+    check("PLAYER role kept during grace", guild.player_role in member_a.roles)
     check("payment-failed DM sent", any("failed" in d.lower() for d in member_a.dms), str(member_a.dms))
     check("payment-failed email sent", any("failed" in s.lower() for _, s in notify_emails), str(notify_emails))
     failed_dms = sum("failed" in d.lower() for d in member_a.dms)
     await cog.process_stripe_webhook_payload(
         evt("evt_3_retry", "invoice.payment_failed", invoice(False, A, "cus_A", "sub_A"))
     )
+    check("retry failure stays in grace", db.subs[A]["status"] == "past_due_grace")
     check("retry failure does not DM again", sum("failed" in d.lower() for d in member_a.dms) == failed_dms, str(member_a.dms))
+    check("PLAYER still present before the window ends", guild.player_role in member_a.roles)
+    db.subs[A]["payment_status"] = "2000-01-01T00:00:00+00:00"
+    removed = await cog._expire_renewal_grace()
+    check("grace expiry removes PLAYER", removed == 1 and guild.player_role not in member_a.roles)
+    check("status payment_failed after grace", db.subs[A]["status"] == "payment_failed")
+
+    print("\nScenario 4b: a first payment that never succeeded does not open grace")
+    D = 444
+    guild.add_member(D)
+    _sub_customer["sub_D"] = "cus_D"
+    await cog.process_stripe_webhook_payload(
+        evt("evt_3d", "invoice.payment_failed", invoice(False, D, "cus_D", "sub_D"))
+    )
+    check("first failure is payment_failed", db.subs[D]["status"] == "payment_failed")
+    check("first failure grants no PLAYER", guild.player_role not in guild.get_member(D).roles)
 
     # ---- Scenario 5: cancellation --------------------------------------
     print("\nScenario 5: customer.subscription.deleted cancels")

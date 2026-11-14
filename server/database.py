@@ -496,6 +496,14 @@ def open_subscriptions() -> list[dict[str, Any]]:
     )
 
 
+def grace_subscriptions() -> list[dict[str, Any]]:
+    """Paying members waiting out the short renewal-charge window."""
+    return _select(
+        "subscriptions",
+        "?select=discord_id,payment_status,status&status=eq.past_due_grace&limit=500",
+    )
+
+
 def is_paid_member(discord_id: int) -> bool:
     row = _single("subscriptions", f"?select=status&discord_id=eq.{discord_id}&limit=1")
     return bool(row and row["status"] in PAID_MEMBER_STATUSES)

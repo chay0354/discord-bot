@@ -155,7 +155,9 @@ def subscription_email(kind: str, *, username: str | None, period_end: str | Non
             "title": "Payment failed ⚠️",
             "body": (
                 f"<p>Hi {name},</p><p>We could not process your latest payment. "
-                "Please update your payment method in the billing portal to keep PLAYER access.</p>"
+                "PLAYER access stays for about 3 hours while the renewal charge completes. "
+                "If it still has not gone through, PLAYER access is removed. "
+                "You can update your payment method in the billing portal.</p>"
             ),
         },
     }

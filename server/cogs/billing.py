@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from weakref import WeakValueDictionary
 
@@ -47,7 +47,9 @@ HANDLED_STRIPE_EVENTS = {
     "invoice.payment_failed",
 }
 
-ACTIVE_STATUSES = {"active", "trialing", "active_until_period_end"}
+ACTIVE_STATUSES = {"active", "trialing", "active_until_period_end", "past_due_grace"}
+# Stripe can take a few hours to collect an automatic renewal. Keep PLAYER during that window.
+RENEWAL_GRACE = timedelta(hours=3)
 _webhook_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
 
@@ -276,6 +278,56 @@ async def refresh_player_subscribe_panel(guild: discord.Guild, bot: commands.Bot
     return sub
 
 
+def _grace_deadline(value: str | None) -> datetime | None:
+    """The grace deadline is stored in payment_status while status is past_due_grace."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _membership_status(
+    *,
+    status: str,
+    event_type: str,
+    prior: dict[str, Any] | None,
+    payment_status: str | None,
+    cancel_at_period_end: bool,
+    now: datetime | None = None,
+) -> tuple[str, str | None]:
+    """Keep a paying member's PLAYER role while an automatic renewal charge is still open.
+
+    A first payment that never succeeded does not get this window. Turning renewal
+    off still ends at the paid period. A canceled subscription ends immediately.
+    """
+    now = now or datetime.now(timezone.utc)
+    if event_type == "customer.subscription.deleted" or status == "canceled":
+        return "canceled", payment_status
+    if status == "incomplete_expired":
+        return status, payment_status
+    if cancel_at_period_end and status == "active" and event_type != "invoice.payment_failed":
+        return "active_until_period_end", payment_status
+    failing = event_type == "invoice.payment_failed" or status in {"past_due", "unpaid"}
+    if not failing:
+        return status, payment_status
+    if cancel_at_period_end and status == "active":
+        return "active_until_period_end", payment_status
+    prior_status = (prior or {}).get("status")
+    if prior_status not in {"active", "active_until_period_end", "past_due_grace"}:
+        return "payment_failed", "failed"
+    deadline = _grace_deadline((prior or {}).get("payment_status")) if prior_status == "past_due_grace" else None
+    if deadline is None:
+        deadline = now + RENEWAL_GRACE
+    if deadline <= now:
+        return "payment_failed", "failed"
+    return "past_due_grace", deadline.isoformat()
+
+
 def _period_end_from_subscription(subscription: dict[str, Any]) -> str | None:
     raw = subscription.get("current_period_end")
     if not raw:
@@ -462,11 +514,42 @@ class BillingCog(commands.Cog):
             retired += 1
         return retired
 
+    async def _expire_renewal_grace(self) -> int:
+        """Remove PLAYER once the renewal charge has had its three hours."""
+        expired = 0
+        now = datetime.now(timezone.utc)
+        for row in database.grace_subscriptions():
+            discord_id = row.get("discord_id")
+            if not discord_id:
+                continue
+            deadline = _grace_deadline(str(row.get("payment_status") or ""))
+            if deadline and deadline > now:
+                continue
+            discord_id = int(discord_id)
+            database.upsert_subscription(
+                discord_id,
+                status="payment_failed",
+                payment_status="failed",
+                last_event_type="renewal_grace_ended",
+            )
+            await self._set_player_role(discord_id, False, reason="renewal_grace_ended")
+            database.log_event(
+                None,
+                "renewal_grace_ended",
+                {"discord_id": discord_id},
+            )
+            expired += 1
+        return expired
+
     @tasks.loop(minutes=5)
     async def _npc_reconcile_loop(self) -> None:
         """Safety net: ensure every member has a role even if the join event was
         missed (e.g. members intent off, downtime, cache miss). Runs on startup
         and every 5 minutes."""
+        try:
+            await self._expire_renewal_grace()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[billing] renewal grace check failed: {exc!r}", flush=True)
         try:
             await self._retire_missing_subscriptions()
         except Exception as exc:  # noqa: BLE001
@@ -725,7 +808,7 @@ class BillingCog(commands.Cog):
             "renewal": f"✅ Your PLAYER subscription renewed. Access continues until `{period_end or 'next period'}`.",
             "cancel_scheduled": f"Your subscription will not renew. You keep PLAYER access until `{period_end or 'period end'}`.",
             "canceled": "Your subscription has ended and the PLAYER role was removed. You can re-subscribe anytime.",
-            "payment_failed": "⚠️ Your latest payment failed. Update your payment method in the billing portal to keep PLAYER access.",
+            "payment_failed": "⚠️ Your latest payment failed. PLAYER stays for about 3 hours while the renewal charge completes. If it still has not gone through, PLAYER is removed.",
         }
         dm = dm_messages.get(kind)
         if dm:
@@ -835,13 +918,13 @@ class BillingCog(commands.Cog):
                 # Checkout completion alone is not settlement (delayed methods).
                 # Preserve a prior subscription until a payment event settles.
                 return discord_id, "unpaid"
-        if event_type == "customer.subscription.deleted":
-            status = "canceled"
-        elif event_type == "invoice.payment_failed":
-            status = "payment_failed"
-            payment_status = "failed"
-        elif cancel_at_period_end and status == "active":
-            status = "active_until_period_end"
+        status, payment_status = _membership_status(
+            status=str(status or "unknown"),
+            event_type=event_type,
+            prior=prior,
+            payment_status=str(payment_status) if payment_status else None,
+            cancel_at_period_end=cancel_at_period_end,
+        )
 
         incoming_sub_id = (subscription or {}).get("id") or _subscription_id_from_payload(obj)
         prior_sub_id = (prior or {}).get("stripe_subscription_id")
@@ -898,11 +981,15 @@ class BillingCog(commands.Cog):
         # distinct Stripe events each map to at most one DM/email, and a duplicate
         # delivery of the same event is skipped earlier by idempotency.
         kind: str | None = None
-        if event_type == "invoice.payment_failed":
+        failing_already = prior_status in {"payment_failed", "past_due", "past_due_grace", "unpaid", "canceled"}
+        if status == "past_due_grace" and not failing_already and database.claim_stripe_event(
+            f"notify_failed_grace_{incoming_sub_id or discord_id}_{payment_status}", "notify.payment_failed"
+        ):
+            kind = "payment_failed"
+        elif event_type == "invoice.payment_failed":
             # Stripe retries a failed invoice and keeps issuing weekly invoices while past due;
             # warn once when the problem starts, never after the subscription has ended.
-            already_failing = prior_status in {"payment_failed", "past_due", "unpaid", "canceled"}
-            if not already_failing and database.claim_stripe_event(
+            if not failing_already and database.claim_stripe_event(
                 f"notify_failed_{obj.get('id') or event_id}", "notify.payment_failed"
             ):
                 kind = "payment_failed"
