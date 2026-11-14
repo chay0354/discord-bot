@@ -262,7 +262,7 @@ def _pick_results_embed_from_tickers(
     if ballot_locked:
         desc += (
             "\n\n**This week's ballot** (from pre-vote). "
-            "Voting is open — vote in the WEEKLY PICKS channels."
+            "Voting is open — vote in the COMPETITIONS channels."
         )
     emb = discord.Embed(
         title="LIVE CHOSEN TICKERS — OPEN",
@@ -1004,7 +1004,7 @@ class StockPickerView(discord.ui.View):
                     await status_msg.edit(
                         content=(
                             "Ticker selection is closed right now. "
-                            "CHOOSE YOUR TICKER reopens after Friday market close."
+                            "CHOOSE TICKER reopens after Friday market close."
                         )
                     )
                     return

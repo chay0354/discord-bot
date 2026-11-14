@@ -264,7 +264,7 @@ def midweek_leaderboard_description(guild=None) -> str:
     large = mention_vote(guild, "blue")
     player = mention_player(guild)
     return (
-        "Voting is still open in the WEEKLY PICKS channels:\n"
+        "Voting is still open in the COMPETITIONS channels:\n"
         f"{small}\n"
         f"{mid}\n"
         f"{large}\n"
@@ -326,7 +326,7 @@ def ticker_channel_closed(cat: int | str, guild=None) -> str:
     results = mention_pick_results(guild)
     return (
         f"The {title} channel has reached the maximum limit of 20/20 different tickers.\n"
-        "Try the other CHOOSE YOUR TICKER channels.\n"
+        "Try the other CHOOSE TICKER channels.\n"
         "The channel will reopen next Friday at 4PM EST.\n"
         f"View the results tables in {results}.\n"
         f"{NOT_INVESTMENT_ADVICE}"
@@ -357,7 +357,7 @@ def live_chosen_tickers_description(guild=None) -> str:
         "Here you can see the tickers selected by subscribers in:\n"
         f"{small} • {mid} • {large}\n"
         "Each category closes after reaching 20 different tickers.\n"
-        "On Monday at 9 AM EST, the selected tickers will move to the WEEKLY PICKS voting channels.\n"
+        "On Monday at 9 AM EST, the selected tickers will move to the COMPETITIONS voting channels.\n"
         "Vote for your favorite ticker before the categories fill up.\n"
         f"{NOT_INVESTMENT_ADVICE}"
     )
@@ -369,7 +369,7 @@ def live_chosen_tickers_closed_for_voting(guild=None) -> str:
     large = mention_vote(guild, "blue")
     return (
         "Voting is now open. This table is closed for the week.\n"
-        "Vote for this week's tickers in the WEEKLY PICKS channels:\n"
+        "Vote for this week's tickers in the COMPETITIONS channels:\n"
         f"{small}\n"
         f"{mid}\n"
         f"{large}\n"
@@ -388,7 +388,7 @@ def winner_incentive_lines(stats: dict | None = None) -> str:
         badge = "🏆"
     return (
         f"Winner streak: {badge} **{streak}** week(s)\n"
-        f"Bonus: **+{bonus} extra vote** in each WEEKLY PICKS category next week."
+        f"Bonus: **+{bonus} extra vote** in each COMPETITIONS category next week."
     )
 
 
@@ -402,9 +402,9 @@ def winner_role_dm(
         f"Your WINNER role is valid for one week, starting now until next Friday ({valid_until_label}) at 4PM EST.\n\n"
         f"{winner_incentive_lines(stats)}\n\n"
         "The WINNER role gives you the same perks as a PLAYER subscription:\n\n"
-        "5 votes per week in each category in the WEEKLY PICKS channels (instead of 1)\n\n"
+        "5 votes per week in each category in the COMPETITIONS channels (instead of 1)\n\n"
         "Access to subscriber-only channels:\n\n"
-        "CHOOSE YOUR TICKER channels — choose which stocks will appear in the WEEKLY PICKS voting during the week\n\n"
+        "CHOOSE TICKER channels — choose which stocks will appear in the COMPETITIONS voting during the week\n\n"
         "LIVE LEADERBOARD channels — track live vote updates and see how many votes each ticker receives in real time\n\n"
         "VIP chat for subscribers only\n\n"
         "⚠️ This role will be removed automatically when the week ends."

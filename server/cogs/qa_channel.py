@@ -19,7 +19,7 @@ _QA_STATE_KEY = "qa_items"
 _DEFAULT_ITEMS: list[dict[str, str]] = [
     {
         "q": "How do I vote?",
-        "a": "Open the WEEKLY PICKS category channels (small / mid / large cap) and press a ticker button. You will get a private confirmation of what you picked.",
+        "a": "Open the COMPETITIONS category channels (small / mid / large cap) and press a ticker button. You will get a private confirmation of what you picked.",
     },
     {
         "q": "Who can win the WINNER role?",
