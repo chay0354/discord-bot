@@ -11,7 +11,7 @@ from discord_names import (
     deny_pin_and_slowmode,
     ensure_styled_roles,
     find_game_role,
-    find_text_channel,
+    names_match,
 )
 
 _QA_STATE_KEY = "qa_items"
@@ -37,11 +37,22 @@ _DEFAULT_ITEMS: list[dict[str, str]] = [
 
 
 def _find_channel(guild: discord.Guild, names: tuple[str, ...]) -> discord.TextChannel | None:
-    """Prefer the styled top-of-server Q&A channel even if perms still need a sync."""
-    preferred = find_text_channel(guild, CHANNEL_QA)
-    if preferred is not None:
-        return preferred
-    return find_text_channel(guild, *names)
+    """Use the styled Q&A name, and skip a locked duplicate the bot cannot post in."""
+    wanted = {CHANNEL_QA, *names}
+    matches = [
+        channel
+        for channel in guild.text_channels
+        if any(names_match(channel.name, name) for name in wanted)
+    ]
+    me = guild.me
+    if me is not None:
+        sendable = [channel for channel in matches if channel.permissions_for(me).send_messages]
+        styled = [channel for channel in sendable if channel.name == CHANNEL_QA]
+        if styled:
+            return styled[0]
+        if sendable:
+            return sendable[0]
+    return matches[0] if matches else None
 
 
 def _load_items(guild_id: int) -> list[dict[str, str]]:
