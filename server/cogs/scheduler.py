@@ -984,6 +984,24 @@ class SchedulerCog(commands.Cog):
         )
         return week_key
 
+    async def _grant_player_after_winner(self, member: discord.Member) -> None:
+        """A saved subscription starts once the WINNER grant is actually over."""
+        try:
+            if not database.is_paid_member(member.id):
+                return
+        except Exception:
+            return
+        billing = self.bot.get_cog("BillingCog")
+        if billing is None:
+            return
+        try:
+            await billing._set_player_role(member.id, True, reason="winner_grant_ended")
+        except Exception as exc:
+            print(
+                f"[scheduler] could not grant PLAYER after WINNER for {member.id}: {exc!r}",
+                flush=True,
+            )
+
     async def _restore_npc_after_winner_removal(
         self,
         member: discord.Member,
@@ -1032,6 +1050,7 @@ class SchedulerCog(commands.Cog):
                         "reason": log_reason,
                     },
                 )
+                await self._grant_player_after_winner(member)
                 await self._restore_npc_after_winner_removal(member, reason=reason)
                 if dm_on_remove:
                     try:
@@ -1119,6 +1138,8 @@ class SchedulerCog(commands.Cog):
                             "expires_at": row.get("expires_at"),
                         },
                     )
+                    database.mark_winner_removed(int(row["id"]))
+                    await self._grant_player_after_winner(member)
                     await self._restore_npc_after_winner_removal(
                         member, reason="WINNER role expired"
                     )

@@ -1268,6 +1268,20 @@ def active_winner_user_ids(guild_id: int, now_iso: str | None = None) -> set[int
     return {int(row["user_id"]) for row in active_winner_grants(guild_id, now_iso)}
 
 
+def active_winner_until(user_id: int, now_iso: str | None = None) -> str | None:
+    """Latest unremoved WINNER grant expiry, if it is still in the future."""
+    now = quote(now_iso or utc_now_iso(), safe="")
+    rows = _select(
+        "winners",
+        f"?select=expires_at&user_id=eq.{int(user_id)}&removed_at=is.null"
+        f"&expires_at=gt.{now}&order=expires_at.desc&limit=1",
+    )
+    if not rows:
+        return None
+    value = rows[0].get("expires_at")
+    return str(value) if value else None
+
+
 def eligible_winners(
     guild_id: int,
     week_key: str,

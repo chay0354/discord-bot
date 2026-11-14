@@ -30,7 +30,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import cogs.billing as billing  # noqa: E402
-from config import ROLE_PLAYER  # noqa: E402
+from config import ROLE_PLAYER, ROLE_WINNER  # noqa: E402
 
 PLAYER = ROLE_PLAYER
 GUILD_ID = 999
@@ -57,6 +57,7 @@ class FakeDB:
         self.subs: dict[int, dict] = {}
         self.events: dict[str, dict] = {}
         self.audit: list[dict] = []
+        self.winner_until: dict[int, str] = {}
 
     # idempotency
     def get_stripe_event(self, event_id):
@@ -118,6 +119,9 @@ class FakeDB:
 
     def log_event(self, guild_id, event_type, details):
         self.audit.append({"event_type": event_type, "details": details})
+
+    def active_winner_until(self, discord_id, now_iso=None):
+        return self.winner_until.get(int(discord_id))
 
 
 # --------------------------------------------------------------------------
@@ -235,6 +239,7 @@ def subscription_obj(discord_id, customer, sub_id, status="active", cancel_at_pe
     obj = {
         "object": "subscription", "id": sub_id, "customer": customer, "status": status,
         "cancel_at_period_end": cancel_at_period_end,
+        "default_payment_method": "pm_test",
         "items": {"data": [{"current_period_end": TS}]},
         "metadata": {"discord_id": str(discord_id)} if discord_id else {},
     }
@@ -436,6 +441,47 @@ async def main() -> int:
     )
     check("cancelling the current subscription still works", db.subs[E]["status"] == "canceled")
     check("PLAYER removed when current subscription ends", guild.player_role not in guild.get_member(E).roles)
+
+    # ---- Scenario 12: WINNER purchase waits until the grant ends --------
+    print("\nScenario 12: WINNER purchase keeps WINNER and does not start PLAYER")
+    W = 777
+    winner_role = FakeRole(ROLE_WINNER, position=6)
+    guild.roles.append(winner_role)
+    member_w = guild.add_member(W)
+    member_w.roles.append(winner_role)
+    db.winner_until[W] = "2099-01-01T00:00:00+00:00"
+    _sub_customer["sub_W"] = "cus_W"
+    billing.retrieve_subscription = lambda sub_id: subscription_obj(
+        None, _sub_customer.get(sub_id), sub_id, status="trialing" if sub_id == "sub_W" else "active"
+    )
+    await cog.process_stripe_webhook_payload(
+        evt("evt_12a", "checkout.session.completed", checkout_completed(W, "cus_W", "sub_W", email="winner@example.com"))
+    )
+    check("winner subscription stored as trialing", db.subs.get(W, {}).get("status") == "trialing", str(db.subs.get(W)))
+    check("WINNER role kept at purchase", winner_role in member_w.roles)
+    check("PLAYER not granted during winner week", guild.player_role not in member_w.roles)
+    check("deferral recorded", any(row["event_type"] == "player_role_deferred" for row in db.audit))
+    check("winner-hold DM sent", any("WINNER" in d for d in member_w.dms), str(member_w.dms))
+    check("winner-hold email sent", any("WINNER" in subject for _, subject in notify_emails), str(notify_emails))
+    dms_before = len(member_w.dms)
+    await cog.process_stripe_webhook_payload(
+        evt("evt_12b", "customer.subscription.updated", subscription_obj(W, "cus_W", "sub_W", status="trialing"))
+    )
+    check("repeat trial event does not DM again", len(member_w.dms) == dms_before)
+    check("PLAYER still absent before the week ends", guild.player_role not in member_w.roles)
+
+    db.winner_until.pop(W)
+    billing.retrieve_subscription = lambda sub_id: subscription_obj(
+        None, _sub_customer.get(sub_id), sub_id, status="active"
+    )
+    await cog.process_stripe_webhook_payload(
+        evt("evt_12c", "invoice.payment_succeeded", invoice(True, W, "cus_W", "sub_W"))
+    )
+    check("subscription active after winner week", db.subs[W]["status"] == "active")
+    check("PLAYER granted after WINNER ends", guild.player_role in member_w.roles)
+    check("WINNER removed when PLAYER starts", winner_role not in member_w.roles)
+    check("welcome sent when PLAYER actually starts", any("PLAYER" in d and "active" in d.lower() for d in member_w.dms), str(member_w.dms))
+    billing.retrieve_subscription = fake_retrieve
 
     print("\n" + ("=" * 52))
     if failures:

@@ -607,6 +607,8 @@ class BillingCog(commands.Cog):
         Role assignment is independent from DMs/emails so a blocked DM can never
         prevent the PLAYER role from being granted (root cause of the demo bug).
         """
+        if active and self._defer_player_for_active_winner(discord_id, reason):
+            return False
         changed = False
         found_member = False
         for guild in self.bot.guilds:
@@ -683,6 +685,27 @@ class BillingCog(commands.Cog):
             )
         return changed
 
+    def _defer_player_for_active_winner(self, discord_id: int, reason: str) -> bool:
+        """A WINNER who starts a subscription keeps that role until the grant ends.
+
+        The website creates that subscription as ``trialing`` until the grant
+        expiry, so the paid week has not started. Do not add PLAYER and do not
+        remove WINNER while both are true.
+        """
+        try:
+            hold = database.active_winner_until(discord_id)
+            status = (database.get_subscription(discord_id) or {}).get("status")
+        except Exception:
+            return False
+        if not hold or status != "trialing":
+            return False
+        database.log_event(
+            None,
+            "player_role_deferred",
+            {"discord_id": discord_id, "until": hold, "reason": reason},
+        )
+        return True
+
     async def _notify(
         self,
         discord_id: int,
@@ -695,6 +718,10 @@ class BillingCog(commands.Cog):
         """Send the lifecycle DM + email for a state transition (best-effort)."""
         dm_messages = {
             "welcome": "🎉 Your subscription is active — **PLAYER** role added. You now get 5 votes per category and access to live leaderboards.",
+            "winner_hold": (
+                f"Your card is saved. You keep **WINNER** until `{period_end or 'the end of this winner week'}`. "
+                "**PLAYER** is added when that role ends, and the first weekly charge happens then."
+            ),
             "renewal": f"✅ Your PLAYER subscription renewed. Access continues until `{period_end or 'next period'}`.",
             "cancel_scheduled": f"Your subscription will not renew. You keep PLAYER access until `{period_end or 'period end'}`.",
             "canceled": "Your subscription has ended and the PLAYER role was removed. You can re-subscribe anytime.",
@@ -859,7 +886,13 @@ class BillingCog(commands.Cog):
         )
 
         active = status in ACTIVE_STATUSES
-        await self._set_player_role(discord_id, active)
+        changed = await self._set_player_role(discord_id, active)
+        hold_until = None
+        if status == "trialing":
+            try:
+                hold_until = database.active_winner_until(discord_id)
+            except Exception:
+                hold_until = None
 
         # Notifications are driven by the state transition + event type so that
         # distinct Stripe events each map to at most one DM/email, and a duplicate
@@ -877,7 +910,14 @@ class BillingCog(commands.Cog):
             kind = "canceled"
         elif status == "active_until_period_end":
             kind = "cancel_scheduled"
-        elif active and not was_active:
+        elif hold_until and (subscription or {}).get("default_payment_method") and database.claim_stripe_event(
+            f"notify_winner_hold_{incoming_sub_id or discord_id}", "notify.winner_hold"
+        ):
+            kind = "winner_hold"
+            current_period_end = hold_until
+        elif changed and active and (not was_active or prior_status == "trialing"):
+            # The first real PLAYER grant after a winner hold is the welcome,
+            # not a renewal, even though Stripe's first charge uses subscription_cycle.
             kind = "welcome"
         elif (
             active

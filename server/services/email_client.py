@@ -117,6 +117,15 @@ def subscription_email(kind: str, *, username: str | None, period_end: str | Non
                 "and ticker pick channels.</p>"
             ),
         },
+        "winner_hold": {
+            "subject": "Your PLAYER membership starts when WINNER ends",
+            "title": "WINNER stays until the week ends",
+            "body": (
+                f"<p>Hi {name},</p><p>Your card is saved. You keep the WINNER role until "
+                f"<b>{pe}</b>. PLAYER is added when that role ends, and the first weekly "
+                "charge happens then.</p>"
+            ),
+        },
         "renewal": {
             "subject": "Your PLAYER subscription renewed",
             "title": "Subscription renewed ✅",
