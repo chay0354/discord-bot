@@ -5,12 +5,15 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from config import FINNHUB_API_KEY
 
 
 FINNHUB_API = "https://finnhub.io/api/v1"
 _CACHE_TTL_SECONDS = 45
+_SESSION = requests.Session()
+_SESSION.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=12))
 _QUOTE_CACHE: dict[str, tuple[float, "FinnhubQuote | None"]] = {}
 _PROFILE_CACHE: dict[str, tuple[float, dict | None]] = {}
 
@@ -42,7 +45,7 @@ def _get(path: str, params: dict[str, str]) -> dict:
         return {}
     merged = {**params, "token": FINNHUB_API_KEY}
     try:
-        response = requests.get(f"{FINNHUB_API}/{path}", params=merged, timeout=8)
+        response = _SESSION.get(f"{FINNHUB_API}/{path}", params=merged, timeout=4)
         response.raise_for_status()
     except requests.RequestException as exc:
         _LAST_ERROR = f"finnhub {path}: {exc!r}"

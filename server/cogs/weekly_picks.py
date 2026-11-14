@@ -918,6 +918,7 @@ class WeeklyVotingView(discord.ui.View):
         member: discord.Member,
         limit: int,
         role_at_vote: str,
+        preloaded: dict | None = None,
     ) -> tuple[bool, str, int, str]:
         """Validate and save a vote. Returns (ok, user_message, save_cat_idx, save_category_key)."""
         def _log_vote(event: str, **extra: object) -> None:
@@ -934,14 +935,17 @@ class WeeklyVotingView(discord.ui.View):
             )
 
         try:
-            ctx = await asyncio.to_thread(
-                database.vote_button_context,
-                guild.id,
-                week_key,
-                category_key,
-                member.id,
-                ticker,
-            )
+            if preloaded is not None:
+                ctx = preloaded
+            else:
+                ctx = await asyncio.to_thread(
+                    database.vote_button_context,
+                    guild.id,
+                    week_key,
+                    category_key,
+                    member.id,
+                    ticker,
+                )
             if not ctx["voting_open"]:
                 _log_vote("vote_rejected", reason="voting_closed")
                 return (
@@ -1079,9 +1083,6 @@ class WeeklyVotingView(discord.ui.View):
         guild = interaction.guild
         cat = self.category_idx
         category_key = ["small", "mid", "blue"][cat]
-        week_key = database.voting_week_key_for_guild(guild.id)
-        if _active_vote_week_key != week_key:
-            await asyncio.to_thread(hydrate_vote_state, guild.id, week_key)
         member: discord.Member = interaction.user
         if not _can_vote(member):
             rules_mention = _channel_mention_or_text(
@@ -1095,16 +1096,7 @@ class WeeklyVotingView(discord.ui.View):
                 ephemeral=True,
             )
             return
-        limit = _vote_limit_for(member, week_key)
-        try:
-            limit += await asyncio.to_thread(
-                database.site_votes_spent, guild.id, week_key, category_key, member.id
-            )
-        except Exception:
-            pass
-        role_at_vote = _role_snapshot(member)
         ticker = ticker.upper().strip().lstrip("$")
-
         if ticker not in self.tickers:
             await interaction.followup.send(
                 f"${ticker} is not on this channel's ballot.",
@@ -1112,6 +1104,25 @@ class WeeklyVotingView(discord.ui.View):
             )
             return
 
+        try:
+            snap = await asyncio.to_thread(
+                database.vote_click_snapshot,
+                guild.id,
+                category_key,
+                member.id,
+                ticker,
+            )
+        except Exception:
+            await interaction.followup.send(
+                "Your vote could not be saved. Please try again.",
+                ephemeral=True,
+            )
+            return
+        week_key = str(snap["week_key"])
+        if _active_vote_week_key != week_key:
+            await asyncio.to_thread(hydrate_vote_state, guild.id, week_key)
+        limit = _vote_limit_for(member, week_key) + int(snap.get("site_votes_spent") or 0)
+        role_at_vote = _role_snapshot(member)
         user_list = _ensure_user_slot(cat, member.id)
         mem_count = len(user_list)
 
@@ -1142,6 +1153,7 @@ class WeeklyVotingView(discord.ui.View):
             member=member,
             limit=limit,
             role_at_vote=role_at_vote,
+            preloaded=snap,
         )
         if not ok:
             if err_msg.startswith("You Have Reached Your Voting Limit"):

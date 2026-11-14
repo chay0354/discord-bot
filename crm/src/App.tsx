@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, isApiConfigured, setAdminKey, type GameHistoryEntry, type GameStatus } from "./api";
+import { api, isApiConfigured, setAdminKey, storedAdminKey, type GameHistoryEntry, type GameStatus } from "./api";
 
 const CATS = ["small", "mid", "blue"] as const;
 type Cat = (typeof CATS)[number];
@@ -106,6 +106,29 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [restoring, setRestoring] = useState(true);
+
+  useEffect(() => {
+    const saved = storedAdminKey();
+    if (!saved) {
+      setRestoring(false);
+      return;
+    }
+    setAdminKey(saved);
+    api
+      .status()
+      .then(() => setAuthenticated(true))
+      .catch(() => setAdminKey(""))
+      .finally(() => setRestoring(false));
+  }, []);
+
+  if (restoring) {
+    return (
+      <main style={{ maxWidth: 440, margin: "15vh auto", padding: 24 }}>
+        <p>Opening dashboard…</p>
+      </main>
+    );
+  }
   if (authenticated) return <Dashboard />;
   return (
     <main style={{ maxWidth: 440, margin: "15vh auto", padding: 24 }}>
@@ -283,6 +306,16 @@ function Dashboard() {
             onClick={() => void refresh({ silent: true })}
           >
             {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => {
+              setAdminKey("");
+              window.location.reload();
+            }}
+          >
+            Sign out
           </button>
         </div>
       </header>

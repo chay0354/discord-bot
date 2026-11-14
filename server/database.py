@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -9,6 +10,7 @@ from threading import RLock
 from zoneinfo import ZoneInfo
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from config import (
     CATEGORIES,
@@ -26,6 +28,16 @@ class SupabaseError(RuntimeError):
 
 _credit_lock = RLock()
 _ET = ZoneInfo("America/New_York")
+# One pool so vote and ticker clicks reuse the TLS connection to Supabase
+# instead of paying a new handshake on every query.
+_http = requests.Session()
+_http.mount("https://", HTTPAdapter(pool_connections=8, pool_maxsize=16))
+_http.mount("http://", HTTPAdapter(pool_connections=8, pool_maxsize=16))
+_CYCLE_TTL_SECONDS = 2.0
+_cycle_cache: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
+_open_week_cache: dict[tuple[str, int], tuple[float, str | None]] = {}
+_known_user_ids: set[int] = set()
+_OPEN_MISS = object()
 
 
 def utc_now_iso() -> str:
@@ -51,7 +63,7 @@ def _url(table: str, query: str = "") -> str:
 
 
 def _request(method: str, table: str, *, query: str = "", json_body: Any = None, headers: dict[str, str] | None = None) -> Any:
-    response = requests.request(
+    response = _http.request(
         method,
         _url(table, query),
         headers=_headers(headers),
@@ -229,11 +241,33 @@ def ticker_selection_week_key_for(dt: datetime | None = None) -> str:
     return week_key_for(now)
 
 
+def _drop_cycle_cache(guild_id: int, week_key: str | None = None) -> None:
+    if week_key is None:
+        for key in list(_cycle_cache):
+            if key[0] == guild_id:
+                _cycle_cache.pop(key, None)
+    else:
+        _cycle_cache.pop((guild_id, week_key), None)
+    _open_week_cache.pop(("vote", guild_id), None)
+    _open_week_cache.pop(("pick", guild_id), None)
+
+
+def _cached_open_week(kind: str, guild_id: int) -> Any:
+    hit = _open_week_cache.get((kind, guild_id))
+    if hit and time.time() - hit[0] < _CYCLE_TTL_SECONDS:
+        return hit[1]
+    return _OPEN_MISS
+
+
 def ensure_cycle(guild_id: int, week_key: str | None = None) -> dict[str, Any]:
     wk = week_key or week_key_for()
+    cached = _cycle_cache.get((guild_id, wk))
+    if cached and time.time() - cached[0] < _CYCLE_TTL_SECONDS:
+        return dict(cached[1])
     row = _single("game_cycles", f"?select=*&guild_id=eq.{guild_id}&week_key=eq.{_eq(wk)}&limit=1")
     if row:
-        return row
+        _cycle_cache[(guild_id, wk)] = (time.time(), dict(row))
+        return dict(row)
     payload = {
         "guild_id": guild_id,
         "week_key": wk,
@@ -282,28 +316,35 @@ def set_cycle_phase(
     if friday_close_at is not None:
         payload["friday_close_at"] = friday_close_at
     _request("PATCH", "game_cycles", query=f"?guild_id=eq.{guild_id}&week_key=eq.{_eq(week_key)}", json_body=payload)
+    _drop_cycle_cache(guild_id, week_key)
 
 
 def open_ticker_selection_week_key(guild_id: int) -> str | None:
     """Week key for the guild's currently open pre-vote cycle, if any."""
+    cached = _cached_open_week("pick", guild_id)
+    if cached is not _OPEN_MISS:
+        return cached
     row = _single(
         "game_cycles",
         f"?select=week_key&guild_id=eq.{guild_id}&ticker_selection_open=eq.true&order=week_key.desc&limit=1",
     )
-    if row and row.get("week_key"):
-        return str(row["week_key"])
-    return None
+    value = str(row["week_key"]) if row and row.get("week_key") else None
+    _open_week_cache[("pick", guild_id)] = (time.time(), value)
+    return value
 
 
 def open_voting_week_key(guild_id: int) -> str | None:
     """Week key for the guild's currently open voting cycle, if any."""
+    cached = _cached_open_week("vote", guild_id)
+    if cached is not _OPEN_MISS:
+        return cached
     row = _single(
         "game_cycles",
         f"?select=week_key&guild_id=eq.{guild_id}&voting_open=eq.true&order=week_key.desc&limit=1",
     )
-    if row and row.get("week_key"):
-        return str(row["week_key"])
-    return None
+    value = str(row["week_key"]) if row and row.get("week_key") else None
+    _open_week_cache[("vote", guild_id)] = (time.time(), value)
+    return value
 
 
 def voting_week_key_for_guild(guild_id: int) -> str:
@@ -335,6 +376,12 @@ def is_voting_open(guild_id: int, week_key: str | None = None) -> bool:
 
 
 def upsert_user(discord_id: int, username: str | None = None, **fields: Any) -> None:
+    profile_update = username is not None or any(
+        key in fields and fields[key] is not None
+        for key in ("full_name", "email", "phone", "marketing_consent")
+    )
+    if int(discord_id) in _known_user_ids and not profile_update:
+        return
     now = utc_now_iso()
     payload = {
         "discord_id": discord_id,
@@ -353,11 +400,13 @@ def upsert_user(discord_id: int, username: str | None = None, **fields: Any) -> 
         json_body=payload,
         headers={"Prefer": "resolution=merge-duplicates"},
     )
+    _known_user_ids.add(int(discord_id))
 
 
 def delete_user(discord_id: int) -> bool:
     """Remove the CRM profile. Falls back to clearing personal fields if other rows still reference it."""
     query = f"?discord_id=eq.{int(discord_id)}"
+    _known_user_ids.discard(int(discord_id))
     try:
         _request("DELETE", "users", query=query)
         return True
@@ -754,15 +803,24 @@ def vote_button_context(
     sym = ticker.upper().strip().lstrip("$")
     cycle = ensure_cycle(guild_id, week_key)
     voting_open = bool(cycle.get("voting_open"))
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         fut_cat = pool.submit(ticker_pick_category, guild_id, week_key, sym)
         fut_count = pool.submit(user_vote_count, guild_id, week_key, category, user_id)
         fut_prior = pool.submit(user_voted_ticker, guild_id, week_key, user_id, sym)
+
+        def _safe_spent() -> int:
+            try:
+                return site_votes_spent(guild_id, week_key, category, user_id)
+            except Exception:
+                return 0
+
+        fut_spent = pool.submit(_safe_spent)
         return {
             "voting_open": voting_open,
             "actual_category": fut_cat.result(),
             "vote_count": fut_count.result(),
             "prior_vote_category": fut_prior.result(),
+            "site_votes_spent": fut_spent.result(),
             # Early-window timing comes from the cycle so ``is_early`` survives a
             # bot restart or a separate manual-start process (in-memory window may
             # be unset there). Authoritative source for the 24h winner window.
@@ -795,6 +853,19 @@ def user_voted_ticker(guild_id: int, week_key: str, user_id: int, ticker: str) -
     return rows[0]["category"] if rows else None
 
 
+def vote_click_snapshot(
+    guild_id: int,
+    category: str,
+    user_id: int,
+    ticker: str,
+) -> dict[str, Any]:
+    """One round of reads for a vote click: open week, ballot, count, and paid votes."""
+    week_key = voting_week_key_for_guild(guild_id)
+    ctx = vote_button_context(guild_id, week_key, category, user_id, ticker)
+    ctx["week_key"] = week_key
+    return ctx
+
+
 def add_ticker_pick(
     guild_id: int,
     week_key: str,
@@ -805,7 +876,6 @@ def add_ticker_pick(
     market_cap: int | None,
     exchange: str | None,
 ) -> tuple[bool, str]:
-    ensure_cycle(guild_id, week_key)
     if not is_ticker_selection_open(guild_id, week_key):
         return False, "closed"
     if category not in CATEGORIES:
@@ -846,7 +916,6 @@ def record_vote(
     role_at_vote: str,
     is_early: bool,
 ) -> tuple[bool, str]:
-    ensure_cycle(guild_id, week_key)
     if not is_voting_open(guild_id, week_key):
         return False, "closed"
     upsert_user(user_id)

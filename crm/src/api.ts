@@ -1,8 +1,23 @@
 const apiBaseUrl = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
-// Keep the key in memory only; VITE_* values are public in the built bundle.
+const SESSION_KEY = "ms_crm_session";
+// The key is typed by the admin. Keep it for this browser tab so a refresh
+// does not ask for it again. Closing the tab clears it.
 let adminKey = "";
 export function setAdminKey(value: string) {
   adminKey = value.trim();
+  try {
+    if (adminKey) sessionStorage.setItem(SESSION_KEY, adminKey);
+    else sessionStorage.removeItem(SESSION_KEY);
+  } catch {
+    /* private browsing can block storage */
+  }
+}
+export function storedAdminKey(): string {
+  try {
+    return (sessionStorage.getItem(SESSION_KEY) || "").trim();
+  } catch {
+    return "";
+  }
 }
 const REQUEST_TIMEOUT_MS = 25_000;
 

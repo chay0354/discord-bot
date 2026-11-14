@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+import time
 from typing import List, Tuple, Dict
 
 import discord
@@ -77,6 +78,10 @@ async def _safe_interaction_reply(interaction: discord.Interaction, message: str
         pass
 
 
+_RESOLVE_TTL_SECONDS = 30 * 60
+_RESOLVE_CACHE: dict[str, tuple[float, dict]] = {}
+
+
 def resolve_ticker_any(symbol: str) -> dict | None:
     """Exact-symbol resolution against real market data.
 
@@ -87,6 +92,9 @@ def resolve_ticker_any(symbol: str) -> dict | None:
     sym = (symbol or "").upper().strip().lstrip("$")
     if not sym:
         return None
+    cached = _RESOLVE_CACHE.get(sym)
+    if cached and time.time() - cached[0] < _RESOLVE_TTL_SECONDS:
+        return cached[1]
     fallback: dict | None = None
     for resolver in (finnhub_resolve_symbol, yahoo_resolve_symbol):
         try:
@@ -97,6 +105,7 @@ def resolve_ticker_any(symbol: str) -> dict | None:
             continue
         # A complete result (known exchange + market-cap category) wins immediately.
         if row.get("exchange_ok") and row.get("category"):
+            _RESOLVE_CACHE[sym] = (time.time(), row)
             return row
         # Otherwise remember the first partial result as a fallback.
         if fallback is None:
@@ -459,7 +468,8 @@ async def _try_add_ticker_to_pick_results(
     msg, emb = found
 
     if submitted_by is not None:
-        ok, reason = database.add_ticker_pick(
+        ok, reason = await asyncio.to_thread(
+            database.add_ticker_pick,
             guild.id,
             week_key,
             category_key,
@@ -481,7 +491,9 @@ async def _try_add_ticker_to_pick_results(
     synced = await sync_pick_results_from_db(guild)
     if not synced:
         return False, "not_found", None
-    count = len(database.list_tickers(guild.id, week_key).get(category_key, []))
+    count = len(
+        (await asyncio.to_thread(database.list_tickers, guild.id, week_key)).get(category_key, [])
+    )
     return True, "ok", count
 
 
@@ -763,46 +775,6 @@ class StockPickerView(discord.ui.View):
             )
             return
 
-        if await _is_channel_closed(self.channel):
-            await interaction.followup.send(
-                game_copy.ticker_channel_closed(
-                    _category_index_for_channel(self.channel), interaction.guild
-                ),
-                ephemeral=True,
-            )
-            return
-
-        key = (self.channel.id, interaction.user.id)
-        already_picked = key in _picks_done
-        try:
-            already_picked = already_picked or database.user_has_ticker_pick(
-                self.channel.guild.id,
-                database.ticker_selection_week_key_for_guild(self.channel.guild.id),
-                category_for_channel(self.channel.name),
-                interaction.user.id,
-            )
-        except Exception:
-            pass
-        try:
-            if shared_state:
-                if hasattr(shared_state, "has_user_pick"):
-                    already_picked = already_picked or shared_state.has_user_pick(
-                        self.channel.id, interaction.user.id
-                    )
-                elif hasattr(shared_state, "user_has_pick"):
-                    already_picked = already_picked or shared_state.user_has_pick(
-                        self.channel.id, interaction.user.id
-                    )
-        except Exception:
-            pass
-
-        if already_picked:
-            await interaction.followup.send(
-                game_copy.already_submitted_ticker(interaction.guild),
-                ephemeral=True,
-            )
-            return
-
         typed = (typed_hint or ticker).upper().strip().lstrip("$")
         status_msg = await interaction.followup.send(
             f"Submitting **${ticker.upper()}**…",
@@ -815,7 +787,7 @@ class StockPickerView(discord.ui.View):
                 status_msg=status_msg,
                 query=ticker,
                 typed=typed,
-                key=key,
+                key=(self.channel.id, interaction.user.id),
             )
         )
 
@@ -935,6 +907,56 @@ class StockPickerView(discord.ui.View):
         key: Tuple[int, int],
     ) -> None:
         try:
+            if key in _picks_done:
+                await status_msg.edit(
+                    content=game_copy.already_submitted_ticker(interaction.guild)
+                )
+                return
+
+            def _precheck() -> tuple[bool, bool]:
+                guild_id = self.channel.guild.id
+                week = database.ticker_selection_week_key_for_guild(guild_id)
+                category = category_for_channel(self.channel.name)
+                closed = (
+                    database.count_tickers(guild_id, week, category)
+                    >= TICKER_LIMIT_PER_CATEGORY
+                )
+                picked = bool(
+                    database.user_has_ticker_pick(
+                        guild_id, week, category, interaction.user.id
+                    )
+                )
+                return closed, picked
+
+            try:
+                closed, already_picked = await asyncio.to_thread(_precheck)
+            except Exception:
+                closed, already_picked = False, False
+            try:
+                if shared_state:
+                    if hasattr(shared_state, "has_user_pick"):
+                        already_picked = already_picked or shared_state.has_user_pick(
+                            self.channel.id, interaction.user.id
+                        )
+                    elif hasattr(shared_state, "user_has_pick"):
+                        already_picked = already_picked or shared_state.user_has_pick(
+                            self.channel.id, interaction.user.id
+                        )
+            except Exception:
+                pass
+            if already_picked:
+                await status_msg.edit(
+                    content=game_copy.already_submitted_ticker(interaction.guild)
+                )
+                return
+            if closed:
+                await status_msg.edit(
+                    content=game_copy.ticker_channel_closed(
+                        _category_index_for_channel(self.channel), interaction.guild
+                    )
+                )
+                return
+
             status, ticker, market_row = await asyncio.to_thread(self._resolve_ticker, query)
             if status != "ok":
                 if status == "api_error":
