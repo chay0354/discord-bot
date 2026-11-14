@@ -520,6 +520,7 @@ def _closed_banner_embed(
     count: int = TICKER_LIMIT_PER_CATEGORY,
     cat_idx: int | None = None,
 ) -> discord.Embed:
+    """20/20 notice. Only for a CHOOSE TICKER channel whose weekend quota is full."""
     cat = cat_idx if cat_idx is not None else 0
     emb = discord.Embed(
         title="CHANNEL CLOSED",
@@ -527,6 +528,15 @@ def _closed_banner_embed(
         color=discord.Color.red()
     )
     return emb
+
+
+def _paused_for_voting_embed(guild: discord.Guild) -> discord.Embed:
+    """CHOOSE TICKER is shut for the week while WEEKLY PICKS voting is open."""
+    return discord.Embed(
+        title="CHANNEL CLOSED",
+        description=game_copy.ticker_channel_paused_for_voting(guild),
+        color=discord.Color.dark_grey(),
+    )
 
 
 # ---------------- small helpers: #mod logging ----------------

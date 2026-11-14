@@ -82,6 +82,16 @@ def main() -> int:
         fails.append("WEEKLY PICKS closed notice must explain where to choose tickers")
     if "top-ranked tickers and winners" not in closed_desc:
         fails.append("Friday close must point users to results channels")
+    if "20/20" not in game_copy.ticker_channel_closed("small"):
+        fails.append("a full weekend quota must still say 20/20")
+    paused = game_copy.ticker_channel_paused_for_voting()
+    if "currently closed" not in paused.lower() or "20/20" in paused:
+        fails.append("midweek CHOOSE TICKER notice must say the channel is closed, not 20/20")
+    if "Friday at 4 PM EST" not in paused:
+        fails.append("midweek CHOOSE TICKER notice must say it reopens next weekend")
+    monday = inspect.getsource(SchedulerCog._monday_open_one_guild)
+    if "_paused_for_voting_embed" not in monday:
+        fails.append("Monday open must switch CHOOSE TICKER channels to the voting notice")
     restart = inspect.getsource(SchedulerCog._restart_pre_voting_one_guild)
     if "PRE-VOTING STAGE ACTIVE" in restart:
         fails.append("starting weekend selection must not replace the WEEKLY PICKS closed notice")

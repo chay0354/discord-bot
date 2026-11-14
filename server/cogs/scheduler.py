@@ -3,7 +3,7 @@
 # - Arm Early Window (24h)
 # - Push tickers from #pick-results to WEEKLY channels as "VOTING OPEN" + live countdown + voting buttons
 # - Keep #pick-results showing this week's ballot during voting (cleared on Friday close)
-# - Close ticker submission channels visually (post "Submissions Closed (x/20)" and remove bot messages)
+# - Close ticker submission channels while voting is open and point members to WEEKLY PICKS
 # - Log a concise report to #mod
 # Includes robust ET/DST fallback (works even without tzdata).
 
@@ -73,7 +73,7 @@ from cogs.submission_ui import (
     _get_pick_results_channel,
     _find_pick_results_message,
     _extract_lists_from_pick_results,
-    _closed_banner_embed,
+    _paused_for_voting_embed,
     _clear_pick_results_message,
     close_pick_results_for_voting,
     reset_picker_runtime_state,
@@ -724,14 +724,14 @@ class SchedulerCog(commands.Cog):
             rpt.fail("live-chosen-tickers table closed for voting", repr(exc))
 
         # 5) Close CHOOSE YOUR TICKER channels visually.
-        ticker_map = {
-            CHANNEL_SMALL_TICKER: 0,
-            CHANNEL_MID_TICKER: 1,
-            CHANNEL_BLUE_TICKER: 2,
-        }
+        ticker_names = (
+            CHANNEL_SMALL_TICKER,
+            CHANNEL_MID_TICKER,
+            CHANNEL_BLUE_TICKER,
+        )
         ticker_closed = 0
         ticker_found = 0
-        for name, idx in ticker_map.items():
+        for name in ticker_names:
             tch = _find_text_channel(guild, name)
             if not tch:
                 continue
@@ -741,9 +741,7 @@ class SchedulerCog(commands.Cog):
             except Exception:
                 pass
             try:
-                emb = _closed_banner_embed(
-                    guild, count=per_cat_counts[idx], cat_idx=idx
-                )
+                emb = _paused_for_voting_embed(guild)
                 await tch.send(embed=emb)
                 ticker_closed += 1
             except Exception:

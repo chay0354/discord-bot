@@ -329,6 +329,21 @@ def ticker_channel_closed(cat: int | str, guild=None) -> str:
     )
 
 
+def ticker_channel_paused_for_voting(guild=None) -> str:
+    """Shown in CHOOSE TICKER channels while midweek voting is open."""
+    small = mention_vote(guild, "small")
+    mid = mention_vote(guild, "mid")
+    large = mention_vote(guild, "blue")
+    return (
+        "This channel is currently closed.\n"
+        "It opens again next weekend, Friday at 4 PM EST.\n"
+        "Vote now in:\n"
+        f"{small}\n"
+        f"{mid}\n"
+        f"{large}"
+    )
+
+
 def live_chosen_tickers_description(guild=None) -> str:
     small = mention_ticker(guild, "small")
     mid = mention_ticker(guild, "mid")
