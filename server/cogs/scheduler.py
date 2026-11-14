@@ -885,6 +885,17 @@ class SchedulerCog(commands.Cog):
                 pass
         return result
 
+    async def _weekly_channel_already_closed(self, channel: discord.TextChannel) -> bool:
+        """True when the latest bot notice already says WEEKLY PICKS is closed."""
+        try:
+            async for message in channel.history(limit=15):
+                if message.author.id != channel.guild.me.id or not message.embeds:
+                    continue
+                return (message.embeds[0].title or "").strip().upper() == "VOTING CLOSED"
+        except Exception:
+            return False
+        return False
+
     async def _restart_pre_voting_one_guild(
         self,
         guild: discord.Guild,
@@ -916,18 +927,18 @@ class SchedulerCog(commands.Cog):
         )
 
         stopped = discord.Embed(
-            title="PRE-VOTING STAGE ACTIVE",
-            description=(
-                "Any previous Vote Stage was stopped. Subscribed users, WINNERS, and admins can now "
-                "choose the 20 stocks for each category."
-            ),
-            color=discord.Color.blurple(),
+            title="VOTING CLOSED",
+            description=game_copy.voting_closed_description(guild),
+            color=discord.Color.dark_grey(),
         )
         for name in (CHANNEL_SMALL_VOTE, CHANNEL_MID_VOTE, CHANNEL_BLUE_VOTE):
             ch = _find_text_channel(guild, name)
-            if ch:
-                await _purge_channel_messages(ch, guild, limit=500)
-                await ch.send(embed=stopped)
+            if not ch:
+                continue
+            if await self._weekly_channel_already_closed(ch):
+                continue
+            await _purge_channel_messages(ch, guild, limit=500)
+            await ch.send(embed=stopped)
 
         for name, cat_key in (
             (CHANNEL_SMALL_LIVE, "small"),

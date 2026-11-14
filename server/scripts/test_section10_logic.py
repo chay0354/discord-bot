@@ -76,8 +76,15 @@ def main() -> int:
     closed_desc = game_copy.voting_closed_description()
     if "Monday at 9 AM" not in closed_desc:
         fails.append("Friday close must state next reopen time")
+    if "currently closed" not in closed_desc.lower():
+        fails.append("WEEKLY PICKS closed notice must say the channel is closed")
+    if "choose this week's tickers" not in closed_desc.lower():
+        fails.append("WEEKLY PICKS closed notice must explain where to choose tickers")
     if "top-ranked tickers and winners" not in closed_desc:
         fails.append("Friday close must point users to results channels")
+    restart = inspect.getsource(SchedulerCog._restart_pre_voting_one_guild)
+    if "PRE-VOTING STAGE ACTIVE" in restart:
+        fails.append("starting weekend selection must not replace the WEEKLY PICKS closed notice")
     if "mention_player" not in (ROOT / "game_copy.py").read_text(encoding="utf-8"):
         fails.append("VOTING CLOSED must use a clickable PLAYER channel mention")
     if "_exhausted_vote_view" not in wp or "_send_vote_limit" not in wp:
