@@ -1524,6 +1524,24 @@ class WeeklyPicksCog(commands.Cog):
             except Exception as exc:
                 print(f"[weekly_picks] recovery: view re-register failed for {guild.id}: {exc!r}", flush=True)
 
+            # 4) Rewrite the open banners so a copy fix reaches the live channels
+            # after a restart. The edit changes the embed text only.
+            try:
+                end_utc = None
+                raw_end = cycle.get("early_window_end_at")
+                if raw_end:
+                    end_utc = datetime.fromisoformat(str(raw_end))
+                    if end_utc.tzinfo is None:
+                        end_utc = end_utc.replace(tzinfo=UTC)
+                refreshed = await refresh_voting_open_banners(guild, end_utc)
+                if refreshed:
+                    print(
+                        f"[weekly_picks] recovery: refreshed {refreshed} voting banner(s) in {guild.id}",
+                        flush=True,
+                    )
+            except Exception as exc:
+                print(f"[weekly_picks] recovery: banner refresh failed for {guild.id}: {exc!r}", flush=True)
+
     def _restore_early_window_from_cycle(self, cycle: dict) -> None:
         if not bool(cycle.get("early_window_open")):
             return

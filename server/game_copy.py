@@ -5,7 +5,7 @@ stay in one place and match the acceptance text.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from config import (
@@ -124,6 +124,25 @@ def mention_winners(guild) -> str:
     return mention(guild, (CHANNEL_WINNERS,), f"#{CHANNEL_WINNERS}")
 
 
+def _format_deadline_et(end_utc: datetime) -> str:
+    """Clock time in US Eastern, which is the game clock.
+
+    The early-winner deadline is 24 hours after voting opens. On the automatic
+    schedule that is Tuesday 9:00 AM ET. A manual Start vote anchors it to the
+    button press, so the banner must show that instant instead of a fixed Tuesday.
+    """
+    if end_utc.tzinfo is None:
+        end_utc = end_utc.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+
+        et = end_utc.astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        et = end_utc.astimezone(timezone(timedelta(hours=-5)))
+    hour = et.strftime("%I").lstrip("0") or "12"
+    return f"{et:%A}, {et:%B} {et.day}, {hour}:{et:%M} {et:%p} ET"
+
+
 def _t_minus_hours(end_utc: datetime | None) -> str:
     if end_utc is None:
         return "24 hours"
@@ -150,20 +169,24 @@ def voting_open_description(
     key = cat_key(cat)
     headline = CATEGORY_HEADLINES[key]
     if end_utc is None:
-        early_line = "Early WINNER window ends in: Tuesday, 9 AM EST — T-minus: 24 hours"
-        timer = ""
+        early_line = "Early WINNER window: 24 hours from when voting opens — T-minus: 24 hours."
     else:
         unix = int(end_utc.timestamp())
         now = datetime.now(tz=timezone.utc)
         aware = end_utc if end_utc.tzinfo else end_utc.replace(tzinfo=timezone.utc)
         if now >= aware:
-            early_line = "Early WINNER window is closed. You can still vote, but new votes do not qualify for WINNER."
-            timer = f"(ended <t:{unix}:F>)"
-        else:
             early_line = (
-                f"Early WINNER window ends in: Tuesday, 9 AM EST — T-minus: {_t_minus_hours(aware)}"
+                "Early WINNER window is closed. You can still vote, but new votes do not qualify for WINNER. "
+                f"(ended {_format_deadline_et(aware)})"
             )
-            timer = f"<t:{unix}:R> (<t:{unix}:F>)"
+        else:
+            # One deadline: the real Eastern time, the remaining time, and Discord's
+            # live countdown in parentheses. A separate <t:F> line rendered in the
+            # viewer's timezone and contradicted the old hardcoded Tuesday label.
+            early_line = (
+                f"Early WINNER window ends {_format_deadline_et(aware)} — "
+                f"T-minus: {_t_minus_hours(aware)} (<t:{unix}:R>)."
+            )
     parts = [
         headline,
         "What to do: Choose your favorite stocks by pressing the buttons below.",
@@ -171,8 +194,6 @@ def voting_open_description(
         "PLAYER/WINNER: Up to 5 votes in this category (Multiple votes per ticker allowed — you may put more than one vote on the same ticker.)",
         early_line,
     ]
-    if timer:
-        parts.append(timer)
     parts.append("Voting closes: Friday, 4 PM EST.")
     parts.append(NOT_INVESTMENT_ADVICE)
     return "\n".join(parts)

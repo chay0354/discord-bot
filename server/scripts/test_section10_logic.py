@@ -31,10 +31,16 @@ def main() -> int:
     if (emb.title or "").upper() != "VOTING OPEN":
         fails.append("vote-open embed title must be VOTING OPEN")
 
-    # 2) 24h early window in open banner
-    desc = _banner_description_with_timer(0, __import__("datetime").datetime.now(__import__("datetime").timezone.utc))
-    if "Early WINNER window" not in desc and "<t:" not in desc:
+    # 2) 24h early window in open banner uses the real deadline, not a fixed Tuesday.
+    from datetime import datetime, timezone
+    end = datetime(2026, 11, 15, 21, 14, tzinfo=timezone.utc)  # Sunday 4:14 PM ET
+    desc = _banner_description_with_timer(0, end)
+    if "Early WINNER window" not in desc or "<t:" not in desc:
         fails.append("vote-open must show early-window deadline")
+    if "Tuesday" in desc:
+        fails.append("early window must not hardcode Tuesday when the deadline is another day")
+    if "Sunday, November 15, 4:14 PM ET" not in desc:
+        fails.append(f"early window must show the actual ET deadline, got: {desc}")
 
     # 3) Friday close time in vote-open message
     if "Friday" not in desc or "4 PM EST" not in desc:
