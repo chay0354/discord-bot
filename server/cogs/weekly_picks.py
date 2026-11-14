@@ -715,11 +715,9 @@ async def _reset_pick_results(guild: discord.Guild) -> None:
 
 # ===================== Voting View =====================
 
-def _vote_button_label(symbol: str, quote: FinnhubQuote | None) -> str:
-    """Discord button label, e.g. $KULR @ $3.60 (max 80 chars)."""
+def _vote_button_label(symbol: str, quote: FinnhubQuote | None = None) -> str:
+    """Button label is the ticker only. Prices stay off the WEEKLY PICKS buttons."""
     sym = symbol.upper().strip().lstrip("$")
-    if quote and quote.current_price is not None:
-        return f"${sym} @ ${quote.current_price:.2f}"[:80]
     return f"${sym}"[:80]
 
 

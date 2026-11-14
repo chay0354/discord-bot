@@ -37,9 +37,9 @@ PICK_RESULTS_CHANNEL_CANDIDATES = tuple(
     )
 )
 
-CHANNEL_SMALL_VOTE = os.getenv("CHANNEL_SMALL_VOTE", "📢small-cap")
-CHANNEL_MID_VOTE = os.getenv("CHANNEL_MID_VOTE", "📢mid-cap")
-CHANNEL_BLUE_VOTE = os.getenv("CHANNEL_BLUE_VOTE", "📢large-cap")
+CHANNEL_SMALL_VOTE = os.getenv("CHANNEL_SMALL_VOTE", "1️⃣small-cap")
+CHANNEL_MID_VOTE = os.getenv("CHANNEL_MID_VOTE", "2️⃣mid-cap")
+CHANNEL_BLUE_VOTE = os.getenv("CHANNEL_BLUE_VOTE", "3️⃣large-cap")
 
 CHANNEL_SMALL_LIVE = os.getenv("CHANNEL_SMALL_LIVE", f"💠🔴small-cap-{_STYLE_LIVE}")
 CHANNEL_MID_LIVE = os.getenv("CHANNEL_MID_LIVE", f"💠🔴mid-cap-{_STYLE_LIVE}")

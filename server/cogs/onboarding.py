@@ -131,14 +131,50 @@ class OnboardingCog(commands.Cog):
             )
         except Exception as exc:
             print(f"[onboarding] cache rules gate failed: {exc!r}", flush=True)
+
+        # The explanation stays above the reaction message. A newer guide means
+        # it was posted under the old reactions, so publish it again and put a
+        # fresh reaction message underneath.
+        if guide and guide.id > gate.id:
+            try:
+                await guide.delete()
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            guide = None
         embed = rules_guide_embed(gate.jump_url)
         try:
             if guide:
                 await guide.edit(embed=embed)
             else:
-                await channel.send(embed=embed)
+                guide = await channel.send(embed=embed)
         except (discord.Forbidden, discord.HTTPException) as exc:
             print(f"[onboarding] cannot publish game instructions in {guild.id}: {exc!r}", flush=True)
+            guide = None
+        if guide and gate.id < guide.id:
+            try:
+                prompt = await channel.send(
+                    "React with 🔥 or 🚀 on this message to receive the NPC role and unlock the game channels."
+                )
+                for emoji in NPC_GATE_EMOJIS:
+                    await prompt.add_reaction(emoji)
+                for reaction in list(gate.reactions):
+                    if str(reaction.emoji) in NPC_GATE_EMOJIS:
+                        try:
+                            await gate.clear_reaction(reaction.emoji)
+                        except (discord.Forbidden, discord.HTTPException):
+                            pass
+                gate = prompt
+                await guide.edit(embed=rules_guide_embed(gate.jump_url))
+                self._gate_message_ids[guild.id] = gate.id
+                database.save_message_state(
+                    guild.id,
+                    _RULES_GATE_STATE_KEY,
+                    channel_id=channel.id,
+                    message_id=gate.id,
+                    payload={"kind": "rules_gate"},
+                )
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                print(f"[onboarding] could not move the rules reaction under the guide: {exc!r}", flush=True)
         print(
             f"[onboarding] bound gate msg {gate.id} in #{channel.name} "
             f"(author={gate.author})",

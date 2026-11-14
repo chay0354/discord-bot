@@ -30,9 +30,11 @@ from config import (
 )
 from discord_names import find_text_channel
 
-# Not legal terms — a short game disclaimer until the buyer supplies full copy.
+# Shown under channel messages. Discord renders a leading -# line as small gray text.
 NOT_INVESTMENT_ADVICE = (
-    "Tickers, votes, rankings, and results are a game and are **not investment advice**."
+    "-# ⚠️ **DISCLAIMER:** MEME STOCK is for entertainment purposes only. "
+    "Votes and rankings reflect in-game popularity, not investment advice or actual market activity. "
+    "Investing involves risk."
 )
 
 CATEGORY_HEADLINES = {
@@ -284,7 +286,8 @@ def final_leaderboard_header(
         f"SMALL CAP — ${small}\n"
         f"MID CAP — ${mid}\n"
         f"LARGE CAP — ${blue}\n"
-        "You can view the full tables with total vote counts below ⬇️"
+        "You can view the full tables with total vote counts below ⬇️\n"
+        f"{NOT_INVESTMENT_ADVICE}"
     )
 
 
@@ -325,7 +328,8 @@ def ticker_channel_closed(cat: int | str, guild=None) -> str:
         f"The {title} channel has reached the maximum limit of 20/20 different tickers.\n"
         "Try the other CHOOSE YOUR TICKER channels.\n"
         "The channel will reopen next Friday at 4PM EST.\n"
-        f"View the results tables in {results}."
+        f"View the results tables in {results}.\n"
+        f"{NOT_INVESTMENT_ADVICE}"
     )
 
 
@@ -340,7 +344,8 @@ def ticker_channel_paused_for_voting(guild=None) -> str:
         "Vote now in:\n"
         f"{small}\n"
         f"{mid}\n"
-        f"{large}"
+        f"{large}\n"
+        f"{NOT_INVESTMENT_ADVICE}"
     )
 
 
@@ -367,7 +372,8 @@ def live_chosen_tickers_closed_for_voting(guild=None) -> str:
         "Vote for this week's tickers in the WEEKLY PICKS channels:\n"
         f"{small}\n"
         f"{mid}\n"
-        f"{large}"
+        f"{large}\n"
+        f"{NOT_INVESTMENT_ADVICE}"
     )
 
 

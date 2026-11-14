@@ -125,8 +125,8 @@ def main() -> int:
     if "Won by voting the top ticker" in card:
         fails.append("winner card must not list winning tickers / win recipe")
     cfg = (ROOT / "config.py").read_text(encoding="utf-8")
-    if '"📢small-cap"' not in cfg:
-        fails.append("WEEKLY PICKS channels must use the 📢 prefix")
+    if '"1️⃣small-cap"' not in cfg or '"2️⃣mid-cap"' not in cfg or '"3️⃣large-cap"' not in cfg:
+        fails.append("WEEKLY PICKS channels must use number emojis 1, 2, and 3")
     if "💎{_STYLE_PLAYER}💎" not in cfg:
         fails.append("PLAYER subscribe channel must be wrapped with 💎")
     if "💠📊small-cap-" not in cfg:
