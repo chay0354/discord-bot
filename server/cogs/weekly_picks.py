@@ -1593,12 +1593,12 @@ class WeeklyPicksCog(commands.Cog):
             (found_live if ch else missing_live).append(name)
 
         emb = discord.Embed(
-            title="Weekly Picks — Status",
+            title="COMPETITIONS — Status",
             description="Sanity check for required channels. No changes were made.",
             color=discord.Color.blurple(),
         )
         emb.add_field(
-            name="Weekly Picks channels",
+            name="COMPETITIONS channels",
             value=(
                 ("✅ Found: " +
                  ", ".join(f"#{n}" for n in found_weekly)) if found_weekly else "—"
@@ -1628,8 +1628,8 @@ class WeeklyPicksCog(commands.Cog):
     @commands.has_role("ADMIN")
     async def enable_voting(self, ctx: commands.Context):
         """
-        ADMIN: scans the three WEEKLY PICKS channels for the most recent bot message
-        titled 'WEEKLY PICKS — <Category>', parses tickers from its 'Tickers' field
+        ADMIN: scans the three COMPETITIONS channels for the most recent bot message
+        titled 'COMPETITIONS — <Category>' (or the older 'WEEKLY PICKS — <Category>'), parses tickers from its 'Tickers' field
         (or from button labels), deletes old bot messages in that channel, and posts a fresh
         'VOTING OPEN' banner with active voting buttons + (if armed) a live countdown line.
         Also primes live leaderboards.
@@ -1674,7 +1674,9 @@ class WeeklyPicksCog(commands.Cog):
                     if msg.author != ctx.guild.me or not msg.embeds:
                         continue
                     e = msg.embeds[0]
-                    if (e.title or "").strip().upper().startswith(f"WEEKLY PICKS — {_category_title(cat).upper()}"):
+                    if (e.title or "").strip().upper().startswith(
+                        tuple(f"{prefix} — {_category_title(cat).upper()}" for prefix in ("COMPETITIONS", "WEEKLY PICKS"))
+                    ):
                         # parse tickers from the "Tickers" field if present
                         field_val = None
                         for f in e.fields:
@@ -1691,7 +1693,7 @@ class WeeklyPicksCog(commands.Cog):
                 pass
 
             if not target_msg or not tickers:
-                await ctx.send(f"No WEEKLY PICKS message with tickers found in **#{ch_name}**.")
+                await ctx.send(f"No COMPETITIONS message with tickers found in **#{ch_name}**.")
                 continue
 
             # Prime in-memory counts (start from 0 for each ticker)
@@ -1727,7 +1729,7 @@ class WeeklyPicksCog(commands.Cog):
             except Exception:
                 pass
 
-        await ctx.send(f"Enabled voting on {updated} WEEKLY PICKS message(s).")
+        await ctx.send(f"Enabled voting on {updated} COMPETITIONS message(s).")
 
     # --- ADMIN: reset everything for a fresh cycle ---
     @commands.command(name="reset_content")

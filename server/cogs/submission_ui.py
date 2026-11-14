@@ -1435,7 +1435,7 @@ class SubmissionUICog(commands.Cog):
                 continue
 
             # Build an embed and a view of buttons
-            title = f"WEEKLY PICKS — {_category_title(idx)}"
+            title = f"COMPETITIONS — {_category_title(idx)}"
             desc = "Click your favorite tickers. (Voting will be enabled soon.)"
             embed = discord.Embed(
                 title=title, description=desc, color=discord.Color.blue())
@@ -1452,7 +1452,7 @@ class SubmissionUICog(commands.Cog):
         # Clear pick-results contents (reset to 0/20)
         await _clear_pick_results_message(pr_msg, pr_emb)
 
-        await ctx.send(f"Pushed buttons to {created} WEEKLY PICKS channels and cleared **#{CHANNEL_PICK_RESULTS}**.")
+        await ctx.send(f"Pushed buttons to {created} COMPETITIONS channels and cleared **#{CHANNEL_PICK_RESULTS}**.")
 
 
 async def setup(bot: commands.Bot):

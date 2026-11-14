@@ -3,7 +3,7 @@
 # - Arm Early Window (24h)
 # - Push tickers from #pick-results to WEEKLY channels as "VOTING OPEN" + live countdown + voting buttons
 # - Keep #pick-results showing this week's ballot during voting (cleared on Friday close)
-# - Close ticker submission channels while voting is open and point members to WEEKLY PICKS
+# - Close ticker submission channels while voting is open and point members to COMPETITIONS
 # - Log a concise report to #mod
 # Includes robust ET/DST fallback (works even without tzdata).
 
@@ -632,7 +632,7 @@ class SchedulerCog(commands.Cog):
             return shown
 
         rpt.info(
-            "Tickers carried over from weekend selection to WEEKLY PICKS",
+            "Tickers carried over from weekend selection to COMPETITIONS",
             f"{total_moved} ticker(s)\n"
             + "\n".join(
                 f"• {_category_title(i)} ({len(lists[i])}): {_fmt_tickers(lists[i])}"
@@ -697,13 +697,13 @@ class SchedulerCog(commands.Cog):
                 pass
 
         rpt.check(
-            "WEEKLY PICKS channels opened with VOTING OPEN + buttons",
+            "COMPETITIONS channels opened with VOTING OPEN + buttons",
             updated == 3,
             (", ".join(opened_mentions) if opened_mentions else f"{updated}/3 channels")
             + ("" if weekly_found == 3 else f" ({weekly_found} found)"),
         )
         rpt.check(
-            "Previous WEEKLY PICKS messages removed",
+            "Previous COMPETITIONS messages removed",
             cleared == weekly_found and weekly_found > 0,
             f"{cleared}/{weekly_found or 3} channels",
         )
@@ -713,17 +713,17 @@ class SchedulerCog(commands.Cog):
             f"{leaderboards_ok}/3 channels",
         )
 
-        # 4) Remove the weekend ticker table and point users to WEEKLY PICKS.
+        # 4) Remove the weekend ticker table and point users to COMPETITIONS.
         try:
             closed = await close_pick_results_for_voting(guild)
             if closed:
-                rpt.ok("live-chosen-tickers table closed for voting", "vote in WEEKLY PICKS")
+                rpt.ok("live-chosen-tickers table closed for voting", "vote in COMPETITIONS")
             else:
                 rpt.info("live-chosen-tickers table closed for voting", "no board found")
         except Exception as exc:
             rpt.fail("live-chosen-tickers table closed for voting", repr(exc))
 
-        # 5) Close CHOOSE YOUR TICKER channels visually.
+        # 5) Close CHOOSE TICKER channels visually.
         ticker_names = (
             CHANNEL_SMALL_TICKER,
             CHANNEL_MID_TICKER,
@@ -747,7 +747,7 @@ class SchedulerCog(commands.Cog):
             except Exception:
                 pass
         rpt.check(
-            "CHOOSE YOUR TICKER channels closed for the week",
+            "CHOOSE TICKER channels closed for the week",
             ticker_closed == ticker_found and ticker_found > 0,
             f"{ticker_closed}/{ticker_found or 3} channels",
         )
@@ -841,7 +841,7 @@ class SchedulerCog(commands.Cog):
         *,
         selection_week_key: str | None = None,
     ) -> dict[str, int]:
-        """Reopen the CHOOSE YOUR TICKER channels. Returns verifiable counts."""
+        """Reopen the CHOOSE TICKER channels. Returns verifiable counts."""
         next_week_key = selection_week_key or database.ticker_selection_week_key_for(_now_utc())
         database.close_open_ticker_selection_cycles(guild.id, except_week_key=next_week_key)
         database.ensure_cycle(guild.id, next_week_key)
@@ -884,7 +884,7 @@ class SchedulerCog(commands.Cog):
         return result
 
     async def _weekly_channel_already_closed(self, channel: discord.TextChannel) -> bool:
-        """True when the latest bot notice already says WEEKLY PICKS is closed."""
+        """True when the latest bot notice already says COMPETITIONS is closed."""
         try:
             async for message in channel.history(limit=15):
                 if message.author.id != channel.guild.me.id or not message.embeds:
@@ -1413,15 +1413,15 @@ class SchedulerCog(commands.Cog):
                 early_window_open=False,
                 friday_close_at=now_utc.isoformat(),
             )
-            rpt.ok("WEEKLY PICKS voting closed successfully")
+            rpt.ok("COMPETITIONS voting closed successfully")
         except Exception as exc:
-            rpt.fail("WEEKLY PICKS voting closed successfully", repr(exc))
+            rpt.fail("COMPETITIONS voting closed successfully", repr(exc))
             await self._announce_report(guild, rpt)
             raise RuntimeError("Could not close voting in the database; results were not published") from exc
 
         clear_vote_runtime_state()
 
-        # 2) Purge WEEKLY PICKS channels (removes buttons) + post VOTING CLOSED.
+        # 2) Purge COMPETITIONS channels (removes buttons) + post VOTING CLOSED.
         leaderboard_ch = _find_text_channel(guild, CHANNEL_FINAL_LEADERBOARD)
         leaderboard_mention = (
             leaderboard_ch.mention
@@ -1453,7 +1453,7 @@ class SchedulerCog(commands.Cog):
             except Exception:
                 pass
         rpt.check(
-            "Buttons were removed from the WEEKLY PICKS channels",
+            "Buttons were removed from the COMPETITIONS channels",
             buttons_removed == len(weekly_names),
             f"{buttons_removed}/{len(weekly_names)} channels",
         )
@@ -1724,7 +1724,7 @@ class SchedulerCog(commands.Cog):
             f"{live_closed}/{len(live_names)} channels",
         )
 
-        # 9) Reopen CHOOSE YOUR TICKER channels for NEXT week — never the week
+        # 9) Reopen CHOOSE TICKER channels for NEXT week — never the week
         # we just closed (a mid-week simulation used to reset this week's data
         # and overwrite VOTING CLOSED).
         try:
@@ -1733,17 +1733,17 @@ class SchedulerCog(commands.Cog):
                 selection_week = database.next_week_key_for(now_utc)
             reopen = await self._reopen_ticker_channels(guild, selection_week_key=selection_week)
             rpt.check(
-                "CHOOSE YOUR TICKER channels were reopened successfully",
+                "CHOOSE TICKER channels were reopened successfully",
                 reopen["reopened"] == reopen["total"],
                 f"{reopen['reopened']}/{reopen['total']} channels",
             )
             rpt.check(
-                "Weekly bot messages in the CHOOSE YOUR TICKER channels were deleted successfully",
+                "Weekly bot messages in the CHOOSE TICKER channels were deleted successfully",
                 reopen["cleared"] == reopen["total"],
                 f"{reopen['cleared']}/{reopen['total']} channels",
             )
         except Exception as exc:
-            rpt.fail("CHOOSE YOUR TICKER channels were reopened successfully", repr(exc))
+            rpt.fail("CHOOSE TICKER channels were reopened successfully", repr(exc))
 
         # 10) Reset the live-chosen-tickers (PICK RESULTS) board.
         try:
