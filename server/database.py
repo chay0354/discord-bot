@@ -500,8 +500,23 @@ def grace_subscriptions() -> list[dict[str, Any]]:
     """Paying members waiting out the short renewal-charge window."""
     return _select(
         "subscriptions",
-        "?select=discord_id,payment_status,status&status=eq.past_due_grace&limit=500",
+        "?select=discord_id,payment_status,status,stripe_subscription_id"
+        "&status=eq.past_due_grace&limit=500",
     )
+
+
+def get_user(discord_id: int) -> dict[str, Any] | None:
+    return _single(
+        "users",
+        f"?select=discord_id,username,email&discord_id=eq.{int(discord_id)}&limit=1",
+    )
+
+
+def release_stripe_event(event_id: str) -> None:
+    """Forget a one-time notice so a later, new membership can send it again."""
+    if not event_id:
+        return
+    _request("DELETE", "stripe_events", query=f"?id=eq.{_eq(event_id)}")
 
 
 def is_paid_member(discord_id: int) -> bool:

@@ -86,6 +86,7 @@ def _stripe_link_view(url: str, *, label: str) -> discord.ui.View:
 
 
 WEBSITE_REGISTER_URL = os.getenv("WEBSITE_REGISTER_URL", "https://memestock.shop/register")
+RENEW_URL = os.getenv("SITE_URL", "https://memestock.shop").rstrip("/") + "/player"
 
 
 def _missing_billing_message() -> str:
@@ -511,6 +512,8 @@ class BillingCog(commands.Cog):
                 {"discord_id": discord_id, "stripe_subscription_id": sub_id},
             )
             await self._set_player_role(discord_id, False, reason="stripe_subscription_missing")
+            if str(row.get("status") or "") in ACTIVE_STATUSES:
+                await self._notify_membership_ended(discord_id, sub_id)
             retired += 1
         return retired
 
@@ -538,6 +541,7 @@ class BillingCog(commands.Cog):
                 "renewal_grace_ended",
                 {"discord_id": discord_id},
             )
+            await self._notify_membership_ended(discord_id, str(row.get("stripe_subscription_id") or ""))
             expired += 1
         return expired
 
@@ -789,6 +793,21 @@ class BillingCog(commands.Cog):
         )
         return True
 
+    async def _notify_membership_ended(self, discord_id: int, subscription_id: str | None) -> None:
+        """One email and one Discord DM when a membership actually ends."""
+        if not database.claim_stripe_event(
+            f"notify_ended_{subscription_id or discord_id}", "notify.canceled"
+        ):
+            return
+        contact = database.get_user(discord_id) or {}
+        await self._notify(
+            discord_id,
+            "canceled",
+            username=contact.get("username"),
+            email=contact.get("email"),
+            period_end=None,
+        )
+
     async def _notify(
         self,
         discord_id: int,
@@ -807,7 +826,10 @@ class BillingCog(commands.Cog):
             ),
             "renewal": f"✅ Your PLAYER subscription renewed. Access continues until `{period_end or 'next period'}`.",
             "cancel_scheduled": f"Your subscription will not renew. You keep PLAYER access until `{period_end or 'period end'}`.",
-            "canceled": "Your subscription has ended and the PLAYER role was removed. You can re-subscribe anytime.",
+            "canceled": (
+                "Your PLAYER membership has ended and is not continuing. "
+                f"If you want to renew it, open {RENEW_URL}"
+            ),
             "payment_failed": "⚠️ Your latest payment failed. PLAYER stays for about 3 hours while the renewal charge completes. If it still has not gone through, PLAYER is removed.",
         }
         dm = dm_messages.get(kind)
@@ -993,7 +1015,13 @@ class BillingCog(commands.Cog):
                 f"notify_failed_{obj.get('id') or event_id}", "notify.payment_failed"
             ):
                 kind = "payment_failed"
-        elif status == "canceled":
+        elif (
+            status == "canceled"
+            and prior_status in ACTIVE_STATUSES
+            and database.claim_stripe_event(
+                f"notify_ended_{incoming_sub_id or discord_id}", "notify.canceled"
+            )
+        ):
             kind = "canceled"
         elif status == "active_until_period_end":
             kind = "cancel_scheduled"
@@ -1015,6 +1043,12 @@ class BillingCog(commands.Cog):
             and database.claim_stripe_event(f"notify_renewal_{obj.get('id') or event_id}", "notify.renewal")
         ):
             kind = "renewal"
+        if status in {"active", "trialing"} and prior_status not in ACTIVE_STATUSES:
+            database.release_stripe_event(f"notify_ended_{incoming_sub_id or discord_id}")
+        if kind == "canceled" and not email:
+            contact = database.get_user(discord_id) or {}
+            email = contact.get("email")
+            username = username or contact.get("username")
         if kind:
             await self._notify(
                 discord_id, kind,

@@ -39,6 +39,7 @@ TS = int(datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp())
 failures: list[str] = []
 notify_dms: list[tuple[int, str]] = []
 notify_emails: list[tuple[str, str]] = []
+notify_email_text: list[str] = []
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -116,6 +117,12 @@ class FakeDB:
     def is_paid_member(self, discord_id):
         row = self.subs.get(discord_id)
         return bool(row and row.get("status") in billing.ACTIVE_STATUSES)
+
+    def get_user(self, discord_id):
+        return self.users.get(int(discord_id))
+
+    def release_stripe_event(self, event_id):
+        self.events.pop(event_id, None)
 
     def grace_subscriptions(self):
         return [row for row in self.subs.values() if row.get("status") == "past_due_grace"]
@@ -273,6 +280,7 @@ async def main() -> int:
 
     def fake_send_email(to, subject, html, text):
         notify_emails.append((to, subject))
+        notify_email_text.append(text or "")
         return True
 
     billing.send_email = fake_send_email
@@ -346,6 +354,16 @@ async def main() -> int:
     removed = await cog._expire_renewal_grace()
     check("grace expiry removes PLAYER", removed == 1 and guild.player_role not in member_a.roles)
     check("status payment_failed after grace", db.subs[A]["status"] == "payment_failed")
+    check(
+        "grace expiry DM includes a renew link",
+        any("ended" in d.lower() and "memestock.shop/player" in d for d in member_a.dms),
+        str(member_a.dms),
+    )
+    check(
+        "grace expiry email includes a renew link",
+        any("ended" in text.lower() and "memestock.shop/player" in text for text in notify_email_text),
+        str(notify_email_text),
+    )
 
     print("\nScenario 4b: a first payment that never succeeded does not open grace")
     D = 444
@@ -356,6 +374,7 @@ async def main() -> int:
     )
     check("first failure is payment_failed", db.subs[D]["status"] == "payment_failed")
     check("first failure grants no PLAYER", guild.player_role not in guild.get_member(D).roles)
+    check("first failure does not say the membership ended", not any("memestock.shop/player" in d for d in guild.get_member(D).dms))
 
     # ---- Scenario 5: cancellation --------------------------------------
     print("\nScenario 5: customer.subscription.deleted cancels")
@@ -364,12 +383,24 @@ async def main() -> int:
         evt("evt_4", "customer.subscription.updated", subscription_obj(A, "cus_A", "sub_A", status="active"))
     )
     check("re-activated", guild.player_role in member_a.roles)
+    ended_before = sum("memestock.shop/player" in d for d in member_a.dms)
     await cog.process_stripe_webhook_payload(
         evt("evt_5", "customer.subscription.deleted", subscription_obj(A, "cus_A", "sub_A", status="canceled", canceled=True))
     )
     check("status canceled", db.subs[A]["status"] == "canceled")
     check("PLAYER role removed on cancel", guild.player_role not in member_a.roles)
-    check("canceled DM sent", any("ended" in d.lower() for d in member_a.dms), str(member_a.dms))
+    check(
+        "canceled DM sent with a renew link",
+        sum("memestock.shop/player" in d for d in member_a.dms) == ended_before + 1,
+        str(member_a.dms),
+    )
+    await cog.process_stripe_webhook_payload(
+        evt("evt_5b", "customer.subscription.deleted", subscription_obj(A, "cus_A", "sub_A", status="canceled", canceled=True))
+    )
+    check(
+        "ending notice is not sent twice",
+        sum("memestock.shop/player" in d for d in member_a.dms) == ended_before + 1,
+    )
 
     # ---- Scenario 6: mapping by customer (no metadata) ------------------
     print("\nScenario 6: webhook without metadata resolves via customer mapping")

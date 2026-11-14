@@ -20,6 +20,7 @@ from typing import Any
 import requests
 
 RESEND_API = "https://api.resend.com/emails"
+RENEW_URL = os.getenv("SITE_URL", "https://memestock.shop").rstrip("/") + "/player"
 
 
 def _from_address() -> str:
@@ -146,8 +147,9 @@ def subscription_email(kind: str, *, username: str | None, period_end: str | Non
             "subject": "Your PLAYER subscription has ended",
             "title": "Subscription ended",
             "body": (
-                f"<p>Hi {name},</p><p>Your PLAYER subscription has ended and PLAYER access has been removed. "
-                "You can re-subscribe anytime from the server.</p>"
+                f"<p>Hi {name},</p><p>Your PLAYER membership has ended and is not continuing. "
+                "PLAYER access has been removed in Discord. Purchased additional votes stay in your balance. "
+                f"If you want to renew it, open <a href=\"{RENEW_URL}\">{RENEW_URL}</a>.</p>"
             ),
         },
         "payment_failed": {
