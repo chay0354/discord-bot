@@ -73,8 +73,8 @@ def main() -> int:
         fails.append("winner bonus votes must be at least 1")
 
     extra_src = (ROOT / "cogs" / "extra_votes.py").read_text(encoding="utf-8")
-    if "extra_votes:buy" not in extra_src or "create_extra_votes_checkout_session" not in extra_src:
-        fails.append("extra-votes channel/button missing")
+    if '"/votes"' not in extra_src or "ButtonStyle.link" not in extra_src:
+        fails.append("extra-votes channel must link to the site /votes page")
     billing_src = (ROOT / "cogs" / "billing.py").read_text(encoding="utf-8")
     if "kind" not in billing_src or "extra_votes" not in billing_src:
         fails.append("billing webhook must route extra_votes purchases")

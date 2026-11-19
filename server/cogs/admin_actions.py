@@ -23,6 +23,16 @@ GAME_ACTIONS: tuple[dict[str, str], ...] = (
         "hint": "Close pre-vote and open the live vote stage with the current ballot.",
     },
     {
+        "id": "close_early",
+        "label": "End 24h window",
+        "hint": "Closes the early 24h window now. Voting stays open, but later NPC votes cannot win WINNER.",
+    },
+    {
+        "id": "end_competition",
+        "label": "End vote",
+        "hint": "Closes the live vote now: final leaderboard, winners and WINNER roles. Pre-vote reopens for next week.",
+    },
+    {
         "id": "end_winner_now",
         "label": "End WINNER now",
         "hint": "Ends every active WINNER role as if its week ran out. A saved PLAYER subscription is charged now.",

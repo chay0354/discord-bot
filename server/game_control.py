@@ -124,11 +124,15 @@ async def run_action(
         }
 
     if action == "close_early":
+        if not database.open_voting_week_key(target.id):
+            raise ValueError("No live vote is open, so there is no 24h window to end.")
         await scheduler._tuesday_early_close_one_guild(target)
         database.log_event(target.id, "close_early", {"actor_id": actor_id})
         return {"ok": True, "message": "Early window closed."}
 
     if action == "end_competition":
+        if not database.open_voting_week_key(target.id):
+            raise ValueError("No live vote is open. Use Start vote first.")
         close_report = await scheduler._friday_close_one_guild(target)
         if close_report.any_failed:
             raise RuntimeError("Game close had failed steps. Review #mod; do not restart until resolved.")
