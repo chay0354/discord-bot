@@ -3,7 +3,8 @@
 Pluggable provider, selected from environment:
   1. RESEND_API_KEY  -> Resend HTTPS API (recommended, no SMTP port needed)
   2. SMTP_HOST/...    -> standard SMTP via smtplib
-  3. (none)           -> graceful no-op that logs the intended email
+  3. (none)           -> the website's mail queue (site.mail_queue in the shared
+                         Supabase project); the website worker sends it with its SMTP
 
 This keeps the bot fully functional in test mode even when no email
 provider is configured: the email content is logged so QA can verify the
@@ -11,9 +12,11 @@ lifecycle without a live mailbox.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import smtplib
 import ssl
+import time
 from email.message import EmailMessage
 from typing import Any
 
@@ -72,6 +75,43 @@ def _send_smtp(to: str, subject: str, html: str, text: str) -> bool:
         return False
 
 
+def _sql_text(value: str) -> str:
+    if "\0" in value:
+        raise ValueError("NUL in email text")
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _queue_on_site(to: str, subject: str, text: str) -> bool:
+    from config import SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
+
+    url = (SUPABASE_URL or "").rstrip("/")
+    key = (SUPABASE_SERVICE_ROLE_KEY or "").strip()
+    if not url or not key:
+        return False
+    # One message per recipient, subject and body per day; a retried webhook does not mail twice.
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    unique = "bot:" + hashlib.sha256(f"{to}|{subject}|{text}|{day}".encode("utf-8")).hexdigest()[:40]
+    sql = (
+        "INSERT INTO mail_queue(user_id,recipient,subject,body,unique_key,created_at) VALUES("
+        f"NULL,{_sql_text(to)},{_sql_text(subject)},{_sql_text(text)},{_sql_text(unique)},{int(time.time())}"
+        ") ON CONFLICT DO NOTHING"
+    )
+    resp = requests.post(
+        f"{url}/rest/v1/rpc/site_exec",
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+        json={"q": sql},
+        timeout=15,
+    )
+    if resp.status_code >= 400:
+        print(f"[email] site mail queue failed {resp.status_code}: {resp.text[:200]}", flush=True)
+        return False
+    return True
+
+
 def send_email(to: str | None, subject: str, html: str, text: str) -> bool:
     """Send an email. Returns True if a provider accepted it.
 
@@ -85,10 +125,11 @@ def send_email(to: str | None, subject: str, html: str, text: str) -> bool:
             return _send_resend(to, subject, html, text)
         if os.getenv("SMTP_HOST"):
             return _send_smtp(to, subject, html, text)
+        if _queue_on_site(to, subject, text):
+            return True
     except Exception as exc:  # noqa: BLE001
         print(f"[email] send error: {exc!r}", flush=True)
         return False
-    # No provider configured: log so QA can still verify the lifecycle.
     print(f"[email] (provider not configured) would send to {to}: {subject}", flush=True)
     return False
 
@@ -122,9 +163,9 @@ def subscription_email(kind: str, *, username: str | None, period_end: str | Non
             "subject": "Your PLAYER membership starts when WINNER ends",
             "title": "WINNER stays until the week ends",
             "body": (
-                f"<p>Hi {name},</p><p>Your card is saved. You keep the WINNER role until "
-                f"<b>{pe}</b>. PLAYER is added when that role ends, and the first weekly "
-                "charge happens then.</p>"
+                f"<p>Hi {name},</p><p>Your payment details have been saved, and your card will be "
+                "charged once your WINNER role expires. If the payment is successful, you'll "
+                "automatically receive the PLAYER role.</p><p>In the meantime, keep enjoying your WINNER perks!</p>"
             ),
         },
         "renewal": {
@@ -162,6 +203,14 @@ def subscription_email(kind: str, *, username: str | None, period_end: str | Non
                 "You can update your payment method in the billing portal.</p>"
             ),
         },
+        "payment_declined": {
+            "subject": "Your PLAYER payment did not go through",
+            "title": "Payment declined ⚠️",
+            "body": (
+                f"<p>Hi {name},</p><p>Your payment did not go through, so the PLAYER role was not added. "
+                f"You can try again with another card at <a href=\"{RENEW_URL}\">{RENEW_URL}</a>.</p>"
+            ),
+        },
     }
     tpl = templates.get(kind)
     if not tpl:
@@ -170,5 +219,5 @@ def subscription_email(kind: str, *, username: str | None, period_end: str | Non
     # crude text fallback
     import re
 
-    text = re.sub("<[^>]+>", "", tpl["body"]).strip()
+    text = re.sub("<[^>]+>", "", tpl["body"].replace("</p>", "</p>\n\n")).strip()
     return {"subject": tpl["subject"], "html": html, "text": text}

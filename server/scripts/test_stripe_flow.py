@@ -374,7 +374,8 @@ async def main() -> int:
     )
     check("first failure is payment_failed", db.subs[D]["status"] == "payment_failed")
     check("first failure grants no PLAYER", guild.player_role not in guild.get_member(D).roles)
-    check("first failure does not say the membership ended", not any("memestock.shop/player" in d for d in guild.get_member(D).dms))
+    check("first failure does not say the membership ended", not any("has ended" in d for d in guild.get_member(D).dms))
+    check("first failure says PLAYER was not added", any("was not added" in d for d in guild.get_member(D).dms))
 
     # ---- Scenario 5: cancellation --------------------------------------
     print("\nScenario 5: customer.subscription.deleted cancels")
@@ -521,6 +522,8 @@ async def main() -> int:
     check("PLAYER still absent before the week ends", guild.player_role not in member_w.roles)
 
     db.winner_until.pop(W)
+    granted_early = await cog._set_player_role(W, True, reason="winner_grant_ended")
+    check("WINNER ended early but trial not charged: no PLAYER yet", not granted_early and guild.player_role not in member_w.roles)
     billing.retrieve_subscription = lambda sub_id: subscription_obj(
         None, _sub_customer.get(sub_id), sub_id, status="active"
     )
@@ -531,6 +534,11 @@ async def main() -> int:
     check("PLAYER granted after WINNER ends", guild.player_role in member_w.roles)
     check("WINNER removed when PLAYER starts", winner_role not in member_w.roles)
     check("welcome sent when PLAYER actually starts", any("PLAYER" in d and "active" in d.lower() for d in member_w.dms), str(member_w.dms))
+    dms_before = len(member_w.dms)
+    await cog.process_stripe_webhook_payload(
+        evt("evt_12d", "customer.subscription.updated", subscription_obj(W, "cus_W", "sub_W", status="active"))
+    )
+    check("second event of the first charge sends no renewal", len(member_w.dms) == dms_before, str(member_w.dms[dms_before:]))
     billing.retrieve_subscription = fake_retrieve
 
     print("\n" + ("=" * 52))

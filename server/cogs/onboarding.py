@@ -24,6 +24,15 @@ GATE_MARKER = "npc-gate-v1"  # legacy: delete if our bot posted one before
 RULES_GUIDE_MARKER = "stock-game-rules-v1"
 _RULES_GATE_STATE_KEY = "rules_gate"
 
+RULES_GATE_TEXT = (
+    "To join the server, click **Complete** and agree to the server rules.\n"
+    "Once you've accepted the rules, click one of the emojis below 👇 to get your **NPC** role.\n\n"
+    "⚠️ **WARNING:** Our rules are clear, and we take our members' experience seriously. "
+    "Please be respectful and follow the server rules at all times.\n\n"
+    "-# ⚠️ **DISCLAIMER:** MEME STOCK is for entertainment purposes only. Votes and rankings reflect "
+    "in-game popularity, not investment advice or actual market activity. Investing involves risk."
+)
+
 
 def rules_guide_embed(gate_url: str) -> discord.Embed:
     embed = discord.Embed(
@@ -152,9 +161,7 @@ class OnboardingCog(commands.Cog):
             guide = None
         if guide and gate.id < guide.id:
             try:
-                prompt = await channel.send(
-                    "React with 🔥 or 🚀 on this message to receive the NPC role and unlock the game channels."
-                )
+                prompt = await channel.send(RULES_GATE_TEXT)
                 for emoji in NPC_GATE_EMOJIS:
                     await prompt.add_reaction(emoji)
                 for reaction in list(gate.reactions):
@@ -175,6 +182,11 @@ class OnboardingCog(commands.Cog):
                 )
             except (discord.Forbidden, discord.HTTPException) as exc:
                 print(f"[onboarding] could not move the rules reaction under the guide: {exc!r}", flush=True)
+        if gate.author.id == self.bot.user.id and gate.content != RULES_GATE_TEXT:
+            try:
+                await gate.edit(content=RULES_GATE_TEXT)
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                print(f"[onboarding] could not update the rules gate text: {exc!r}", flush=True)
         print(
             f"[onboarding] bound gate msg {gate.id} in #{channel.name} "
             f"(author={gate.author})",

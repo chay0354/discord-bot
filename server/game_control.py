@@ -135,6 +135,21 @@ async def run_action(
         database.log_event(target.id, "end_competition", {"actor_id": actor_id})
         return {"ok": True, "message": "Vote stage ended."}
 
+    if action == "end_winner_now":
+        # Same path as the weekly expiry: remove WINNER, DM the member, and start any
+        # saved PLAYER subscription (Stripe charges now; PLAYER follows the paid invoice).
+        ended = await scheduler._expire_winners(target, end_eligibility_week=True)
+        database.log_event(target.id, "end_winner_now", {"actor_id": actor_id, "removed": ended})
+        if not ended:
+            return {"ok": True, "message": "No active WINNER roles to end."}
+        return {
+            "ok": True,
+            "message": (
+                f"Ended WINNER for {ended} member(s). Saved PLAYER subscriptions are charged now; "
+                "PLAYER is added when the payment succeeds."
+            ),
+        }
+
     if action in ("reset_winner_grants", "reset_winner"):
         revoked_ids = database.revoke_all_active_winner_grants(target.id)
         roles_removed = await scheduler._sync_winner_roles(

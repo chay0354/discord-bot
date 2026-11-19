@@ -79,6 +79,7 @@ from cogs.submission_ui import (
     reset_picker_runtime_state,
 )
 import game_copy
+from services.stripe_client import end_trial_now
 
 # --- TZ handling: try ZoneInfo; else robust manual ET with US DST rules ---
 try:
@@ -994,11 +995,34 @@ class SchedulerCog(commands.Cog):
         return week_key
 
     async def _grant_player_after_winner(self, member: discord.Member) -> None:
-        """A saved subscription starts once the WINNER grant is actually over."""
+        """A saved subscription starts once the WINNER grant is actually over.
+
+        A WINNER-hold subscription is still ``trialing`` (not charged). End the
+        trial so Stripe charges now; the paid-invoice webhook grants PLAYER and
+        sends the welcome. PLAYER is never given before the charge succeeds.
+        """
         try:
+            sub = database.get_subscription(member.id) or {}
             if not database.is_paid_member(member.id):
                 return
         except Exception:
+            return
+        if sub.get("status") == "trialing":
+            sub_id = str(sub.get("stripe_subscription_id") or "")
+            if not sub_id:
+                return
+            try:
+                await asyncio.to_thread(end_trial_now, sub_id)
+                database.log_event(
+                    member.guild.id,
+                    "winner_hold_trial_ended",
+                    {"discord_id": member.id, "stripe_subscription_id": sub_id},
+                )
+            except Exception as exc:
+                print(
+                    f"[scheduler] could not start the paid period for {member.id}: {exc!r}",
+                    flush=True,
+                )
             return
         billing = self.bot.get_cog("BillingCog")
         if billing is None:

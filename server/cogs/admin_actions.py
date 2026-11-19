@@ -23,6 +23,11 @@ GAME_ACTIONS: tuple[dict[str, str], ...] = (
         "hint": "Close pre-vote and open the live vote stage with the current ballot.",
     },
     {
+        "id": "end_winner_now",
+        "label": "End WINNER now",
+        "hint": "Ends every active WINNER role as if its week ran out. A saved PLAYER subscription is charged now.",
+    },
+    {
         "id": "reset_winner_grants",
         "label": "Reset WINNER grants",
         "hint": "Clears every Discord WINNER role and any active DB grants. Normal duration is one week (not 24h).",

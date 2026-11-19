@@ -272,7 +272,7 @@ class PermissionEnsurer(discord.Client):
                 (CHANNEL_WINNERS, public_overwrites(), (), False),
                 (CHANNEL_MANAGE_SUBSCRIPTION, public_overwrites(), MANAGE_SUBSCRIPTION_CHANNEL_CANDIDATES, True),
                 (CHANNEL_QA, public_overwrites(), QA_CHANNEL_CANDIDATES, True),
-                (CHANNEL_EXTRA_VOTES, subscriber_overwrites(), EXTRA_VOTES_CHANNEL_CANDIDATES, True),
+                (CHANNEL_EXTRA_VOTES, public_overwrites(), EXTRA_VOTES_CHANNEL_CANDIDATES, True),
                 (CHANNEL_RULES, rules_overwrites(), RULES_CHANNEL_CANDIDATES, False),
             ]
             for name, overwrites, aliases, rename in channel_specs:

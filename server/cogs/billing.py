@@ -292,6 +292,17 @@ def _grace_deadline(value: str | None) -> datetime | None:
     return parsed
 
 
+def _first_charge_after_trial(obj: dict[str, Any], subscription: dict[str, Any] | None) -> bool:
+    """The invoice that ends a WINNER-hold trial covers the trial period; it is a start, not a renewal."""
+    trial_end = (subscription or {}).get("trial_end")
+    if not trial_end or obj.get("object") != "invoice":
+        return False
+    try:
+        return int(obj.get("period_end") or 0) <= int(trial_end)
+    except (TypeError, ValueError):
+        return False
+
+
 def _membership_status(
     *,
     status: str,
@@ -776,21 +787,23 @@ class BillingCog(commands.Cog):
         """A WINNER who starts a subscription keeps that role until the grant ends.
 
         The website creates that subscription as ``trialing`` until the grant
-        expiry, so the paid week has not started. Do not add PLAYER and do not
-        remove WINNER while both are true.
+        expiry, so the paid week has not started. PLAYER waits for the first
+        paid invoice, even when WINNER ended early (manual close or admin test):
+        the scheduler then ends the Stripe trial so the charge happens at once.
         """
         try:
-            hold = database.active_winner_until(discord_id)
             status = (database.get_subscription(discord_id) or {}).get("status")
+            if status != "trialing":
+                return False
+            hold = database.active_winner_until(discord_id)
         except Exception:
             return False
-        if not hold or status != "trialing":
-            return False
-        database.log_event(
-            None,
-            "player_role_deferred",
-            {"discord_id": discord_id, "until": hold, "reason": reason},
-        )
+        if hold:
+            database.log_event(
+                None,
+                "player_role_deferred",
+                {"discord_id": discord_id, "until": hold, "reason": reason},
+            )
         return True
 
     async def _notify_membership_ended(self, discord_id: int, subscription_id: str | None) -> None:
@@ -821,8 +834,9 @@ class BillingCog(commands.Cog):
         dm_messages = {
             "welcome": "🎉 Your subscription is active — **PLAYER** role added. You now get 5 votes per category and access to live leaderboards.",
             "winner_hold": (
-                f"Your card is saved. You keep **WINNER** until `{period_end or 'the end of this winner week'}`. "
-                "**PLAYER** is added when that role ends, and the first weekly charge happens then."
+                "Your payment details have been saved, and your card will be charged once your WINNER role expires. "
+                "If the payment is successful, you'll automatically receive the PLAYER role.\n"
+                "In the meantime, keep enjoying your WINNER perks!"
             ),
             "renewal": f"✅ Your PLAYER subscription renewed. Access continues until `{period_end or 'next period'}`.",
             "cancel_scheduled": f"Your subscription will not renew. You keep PLAYER access until `{period_end or 'period end'}`.",
@@ -831,6 +845,10 @@ class BillingCog(commands.Cog):
                 f"If you want to renew it, open {RENEW_URL}"
             ),
             "payment_failed": "⚠️ Your latest payment failed. PLAYER stays for about 3 hours while the renewal charge completes. If it still has not gone through, PLAYER is removed.",
+            "payment_declined": (
+                "⚠️ Your payment did not go through, so the **PLAYER** role was not added. "
+                f"You can try again with another card here: {RENEW_URL}"
+            ),
         }
         dm = dm_messages.get(kind)
         if dm:
@@ -1014,7 +1032,7 @@ class BillingCog(commands.Cog):
             if not failing_already and database.claim_stripe_event(
                 f"notify_failed_{obj.get('id') or event_id}", "notify.payment_failed"
             ):
-                kind = "payment_failed"
+                kind = "payment_failed" if status == "past_due_grace" else "payment_declined"
         elif (
             status == "canceled"
             and prior_status in ACTIVE_STATUSES
@@ -1030,13 +1048,22 @@ class BillingCog(commands.Cog):
         ):
             kind = "winner_hold"
             current_period_end = hold_until
-        elif changed and active and (not was_active or prior_status == "trialing"):
+        elif (
+            changed
+            and active
+            and (not was_active or prior_status == "trialing")
+            and database.claim_stripe_event(
+                f"notify_welcome_{incoming_sub_id or discord_id}", "notify.welcome"
+            )
+        ):
             # The first real PLAYER grant after a winner hold is the welcome,
             # not a renewal, even though Stripe's first charge uses subscription_cycle.
             kind = "welcome"
         elif (
             active
             and was_active
+            and prior_status != "trialing"
+            and not _first_charge_after_trial(obj, subscription)
             and event_type == "invoice.payment_succeeded"
             and obj.get("billing_reason") == "subscription_cycle"
             # invoice.paid and invoice.payment_succeeded both arrive for one renewal.

@@ -84,8 +84,8 @@ def main() -> int:
         fails.append("Friday close must state next reopen time")
     if "currently closed" not in closed_desc.lower():
         fails.append("WEEKLY PICKS closed notice must say the channel is closed")
-    if "choose this week's tickers" not in closed_desc.lower():
-        fails.append("WEEKLY PICKS closed notice must explain where to choose tickers")
+    if "call the shots on which tickers" not in closed_desc.lower():
+        fails.append("COMPETITIONS closed notice must invite members to pick tickers as PLAYER")
     if "top-ranked tickers and winners" not in closed_desc:
         fails.append("Friday close must point users to results channels")
     if "20/20" not in game_copy.ticker_channel_closed("small"):

@@ -242,16 +242,13 @@ def vote_limit_message(cat: int | str, *, is_npc: bool, guild=None) -> str:
 def voting_closed_description(guild=None) -> str:
     lb = mention_leaderboard(guild)
     winners = mention_winners(guild)
-    small = mention_ticker(guild, "small")
-    mid = mention_ticker(guild, "mid")
-    large = mention_ticker(guild, "blue")
+    player = mention_player(guild)
     return (
         "This channel is currently closed.\n"
         "Voting in this channel opens Monday at 9 AM EST.\n"
-        "Until then, choose this week's tickers in:\n"
-        f"{small}\n"
-        f"{mid}\n"
-        f"{large}\n"
+        "Until then, call the shots on which tickers make it into the next competition "
+        "and unlock even more perks!\n"
+        f"Become a {player}!\n"
         "To review this week’s top-ranked tickers and winners:\n"
         f"{lb}\n"
         f"{winners}\n"

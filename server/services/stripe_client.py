@@ -160,6 +160,29 @@ def cancel_subscription(subscription_id: str) -> dict[str, Any] | None:
     return response.json()
 
 
+def end_trial_now(subscription_id: str) -> dict[str, Any] | None:
+    """Start the paid period of a trialing subscription immediately; Stripe charges the saved card.
+
+    Returns None when Stripe no longer has the subscription.
+    """
+    settings = _settings()
+    response = requests.post(
+        f"{STRIPE_API}/subscriptions/{subscription_id}",
+        auth=(settings.secret_key, ""),
+        data={"trial_end": "now", "proration_behavior": "none"},
+        timeout=15,
+    )
+    if response.status_code >= 400:
+        try:
+            error = response.json().get("error") or {}
+        except ValueError:
+            error = {}
+        if error.get("code") == "resource_missing":
+            return None
+        raise StripeClientError(f"Stripe trial end failed: {response.status_code} {response.text}")
+    return response.json()
+
+
 def retrieve_subscription(subscription_id: str) -> dict[str, Any] | None:
     """Return the subscription, or None when Stripe no longer has it."""
     settings = _settings()
