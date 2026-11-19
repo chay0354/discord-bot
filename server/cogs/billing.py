@@ -1072,7 +1072,9 @@ class BillingCog(commands.Cog):
             kind = "renewal"
         if status in {"active", "trialing"} and prior_status not in ACTIVE_STATUSES:
             database.release_stripe_event(f"notify_ended_{incoming_sub_id or discord_id}")
-        if kind == "canceled" and not email:
+        if kind and not email:
+            # Subscription updates often arrive without the customer email.
+            # The address saved at checkout is enough for the notice.
             contact = database.get_user(discord_id) or {}
             email = contact.get("email")
             username = username or contact.get("username")
